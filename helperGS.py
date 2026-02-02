@@ -639,16 +639,23 @@ class StartX:
         '''
 
         if orderId == 0:
-            return('Order Data not avaiable..!')
+            return 'Order Data not available..!'
 
         for i in range(10):
             try:
                 df = pd.read_csv('trades.csv')
-                res = df[df['reference_id'] == orderId].to_dict(orient='records')[0]
+                filtered = df[df['reference_id'] == orderId]
+                if filtered.empty:
+                    printt(f'Order {orderId} not found in trades.csv, retrying...', i)
+                    time.sleep(2)
+                    continue
+                res = filtered.to_dict(orient='records')[0]
                 return res
             except Exception as e:
-                printt('Error Order()_orderStatus :- ',e,i)
+                printt('Error Order()_orderStatus :- ', e, i)
                 time.sleep(2)
+        
+        return 'Order not found after retries'
       
 
 
