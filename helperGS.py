@@ -552,29 +552,4 @@ def getFreezeQua(freeze_limit, lot_size, total_quantity):
             return None
         
 
-placeOrderStratX_NSE(
-    client_ids=["H13894"],
-    strategy_name="PrimeTorque",
-    symbol="NIFTY",
-    strike=26000,
-    expiry="20260203",
-    buyorsell="SELL",
-    producttype="INTRADAY",
-    ordertype="LIMIT",
-    quantity=65,
-    right="CE"
-)
 
-# BSE Order
-placeOrderStratX_BSE(
-    client_ids=["H13894"],
-    strategy_name="PrimeTorque",
-    symbol="SENSEX",
-    strike=80700,
-    expiry="20260203",
-    buyorsell="BUY",
-    producttype="INTRADAY",
-    ordertype="MARKET",
-    quantity=65,
-    right="PE"
-)
