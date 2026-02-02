@@ -413,6 +413,7 @@ class StartX:
         # lots = [x / int(dt.LotSize) for x in quantity]
 
         producttype = "DELIVERY" 
+        iid = []
 
         payload = json.dumps({
             "id": cre.id,
@@ -422,7 +423,7 @@ class StartX:
                     "client_ids": [cre.client_id],
                     "strategy_name": strategy_name,
                     "symbol": name,
-                    "strike": trade[5],
+                    "strike": float(trade[5]),
                     "expiry": self.to_yyyymmdd(trade[4]), # ddmmyy so convert to yyyymmdd
                     "buyorsell": side,
                     "producttype": producttype,
@@ -460,12 +461,31 @@ class StartX:
         }
         
         try:
-            response = requests.request("POST", url, headers=headers, data=payload)
-            printt(f"NSE Order Response: {response.text}")
-            return response.json()
+            for _ in range(30):
+                response = requests.request("POST", url, headers=headers, data=payload)
+                printt(f"NSE Order Response: {response.text}")
+                r = response.json()
+                '''
+                {
+                    "status": 1,
+                    "data": [
+                        {
+                        "details": {
+                            "Leg-1": "order request sent"
+                        },
+                        "reference_id": "41b6f6e3-2267-4353-8f1b-77cbb8eaa826"
+                        }
+                    ],
+                    "errors": {}
+                    }
+                '''
+                iid.append(r['data'][0]['reference_id'])
+                break
         except Exception as e:
             printt(f"Error placing NSE order: {e}")
             return None
+        
+        return iid
 
 
     def placeOrderStratX_BSE(self, name, side, trade, strategy_name = "PrimeTorque"):
@@ -498,7 +518,7 @@ class StartX:
         url = f"https://{cre.startX_url}/api/v1/orders/place-order/"
 
         producttype = "DELIVERY" 
-        
+        iid = []
         payload = json.dumps({
             "id": cre.id,
             "secret_key": cre.secret_key,
@@ -507,7 +527,7 @@ class StartX:
                     "client_ids": [cre.client_id],
                     "strategy_name": strategy_name,
                     "symbol": name,
-                    "strike": trade[5],
+                    "strike": float(trade[5]),
                     "expiry": self.to_yyyymmdd(trade[4]), # ddmmyy so convert to yyyymmdd
                     "buyorsell": side,
                     "producttype": producttype,
@@ -545,16 +565,78 @@ class StartX:
         }
         
         try:
-            response = requests.request("POST", url, headers=headers, data=payload)
-            printt(f"BSE Order Response: {response.text}")
-            return response.json()
+            for _ in range(30):
+                response = requests.request("POST", url, headers=headers, data=payload)
+                printt(f"BSE Order Response: {response.text}")
+                r = response.json()
+                iid.append(r['data'][0]['reference_id'])
+                break
         except Exception as e:
             printt(f"Error placing BSE order: {e}")
             return None
+        return iid
         
     
 
     def getOrderStatus(self,orderId):
+        '''
+        {
+        "status": 1,
+        "data": [
+            [
+            {
+                "id": "6650142e2625a49d59e9d667",
+                "executed_on": "2024-05-24 09:44:38",
+                "buyorsell": "BUY",
+                "quantity": 100,
+                "price": 1496.050048828125,
+                "created_at": "2024-05-24 09:44:38",
+                "status": "ERROR",
+                "symbol": "NIFTY",
+                "exchange": "NSEFO",
+                "producttype": "INTRADAY",
+                "order_message": "Invalid Token",
+                "source": "drona",
+                "reference_id": "ad005bf3-7b97-4b87-88fa-d1bfc1f69f32",
+                "order_number": "0",
+                "strategy_name": "Test",
+                "client_id": "satbk119",
+                "expiry": "20240530",
+                "strike": 21500,
+                "right": "CE",
+                "trading_symbol": "NIFTY24MAY21500CE",
+                "portfolio_name": "Test_1X",
+                "strategy_id": "66347deb99019256b01a9b58"
+            },
+            {
+                "id": "6650142e2625a49d59e9d668",
+                "executed_on": "2024-05-24 09:44:38",
+                "buyorsell": "BUY",
+                "quantity": 100,
+                "price": 1496.050048828125,
+                "created_at": "2024-05-24 09:44:38",
+                "status": "ERROR",
+                "symbol": "NIFTY",
+                "exchange": "NSEFO",
+                "producttype": "INTRADAY",
+                "order_message": "Invalid Token",
+                "source": "drona",
+                "reference_id": "ad005bf3-7b97-4b87-88fa-d1bfc1f69f32",
+                "order_number": "0",
+                "strategy_name": "Test",
+                "client_id": "KEEVTEST1",
+                "expiry": "20240530",
+                "strike": 21500,
+                "right": "CE",
+                "trading_symbol": "NIFTY24MAY21500CE",
+                "portfolio_name": "Test_1x",
+                "strategy_id": "66347deb99019256b01a9b58"
+            }
+            ]
+        ],
+        "errors": {}
+        }
+        '''
 
         if orderId == 0:
             return('Order Data not avaiable..!')
@@ -562,7 +644,7 @@ class StartX:
         for i in range(10):
             try:
                 df = pd.read_csv('trades.csv')
-                res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')[0]
+                res = df[df['reference_id'] == orderId].to_dict(orient='records')[0]
                 return res
             except Exception as e:
                 printt('Error Order()_orderStatus :- ',e,i)
