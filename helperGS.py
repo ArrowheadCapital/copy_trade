@@ -652,7 +652,7 @@ class StartX:
       
 
 
-    def getOrderBookALL():
+    def getOrderBookALL(self):
         url = f"https://{cre.startX_url}/api/v1/reports/order/fields/?page_size=10&page_number=1"
         payload = json.dumps({
             "id": cre.id,
