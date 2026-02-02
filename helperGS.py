@@ -370,7 +370,8 @@ def getFreezeQua(freeze_limit, lot_size, total_quantity):
         total_quantity -= qty
     return result
 
-
+def to_yyyymmdd(date_str: str) -> str:
+    return datetime.datetime.strptime(date_str.strip().upper(), "%d%b%Y").strftime("%Y%m%d")
 # StratX API Place Order Functions
 def placeOrderStratX_NSE(client_ids, strategy_name, symbol, strike, expiry, buyorsell, 
                          producttype, ordertype, quantity, price=None, right="CE", 
