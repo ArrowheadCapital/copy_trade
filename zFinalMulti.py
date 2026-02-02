@@ -28,6 +28,7 @@ H.createLogFile()
 H.checkTime(datetime.time(5, 15, 1))
 
 gsobj = HG.greeksoft()
+startObj = HG.StartX()
 
 today = datetime.datetime.today().strftime("%m%d")
 csvPathNSE = cre.pathNSE.format(formatted_date=today)
@@ -81,17 +82,27 @@ def nse_worker():
             dt = gsobj.getData(t)
 
             execute_with_retry(
-                gsobj.placeOrder,
+                startObj.placeOrderStratX_NSE,
                 [
-                    dt.GreekToken,
-                    t[13],
-                    dt.Symbol,
-                    int(t[14] / dt.LotSize),
-                    int(t[14]),
-                    dt
+                    t[3],
+                    'BUY' if t[13] == 1 else 'SELL',
+                    t
                 ],
-                dt.LotSize
             )
+
+
+            # execute_with_retry(
+            #     gsobj.placeOrder,
+            #     [
+            #         dt.GreekToken,
+            #         t[13],
+            #         dt.Symbol,
+            #         int(t[14] / dt.LotSize),
+            #         int(t[14]),
+            #         dt
+            #     ],
+            #     dt.LotSize
+            # )
 
             NSE_QUEUE.task_done()
 
@@ -110,17 +121,27 @@ def bse_worker():
             dt = gsobj.getDataBSE(t[4])
 
             execute_with_retry(
-                gsobj.placeOrderBSE,
+                startObj.placeOrderStratX_BSE,
                 [
-                    dt.GreekToken,
+                    t[3],
                     action,
-                    dt.Symbol,
-                    int(t[7] / dt.LotSize),
-                    int(t[7]),
-                    dt
+                    t
                 ],
-                dt.LotSize
             )
+
+
+            # execute_with_retry(
+            #     gsobj.placeOrderBSE,
+            #     [
+            #         dt.GreekToken,
+            #         action,
+            #         dt.Symbol,
+            #         int(t[7] / dt.LotSize),
+            #         int(t[7]),
+            #         dt
+            #     ],
+            #     dt.LotSize
+            # )
 
             BSE_QUEUE.task_done()
 
