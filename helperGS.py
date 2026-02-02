@@ -369,6 +369,7 @@ def getFreezeQua(freeze_limit, lot_size, total_quantity):
         result.append(qty)
         total_quantity -= qty
     return result
+class StartX:
 
     def to_yyyymmdd(self, date_str: str) -> str:
         return datetime.datetime.strptime(date_str.strip().upper(), "%d%b%Y").strftime("%Y%m%d")
