@@ -1,0 +1,8 @@
+/logs
+*.csv
+*.txt
+
+credentials.py
+
+__pycache__/
+.env
