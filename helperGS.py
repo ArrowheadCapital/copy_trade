@@ -4,6 +4,7 @@ import os
 import time
 import pandas as pd
 from io import StringIO
+import json
 import credentials as cre
 
 urll = cre.urll
@@ -368,3 +369,193 @@ def getFreezeQua(freeze_limit, lot_size, total_quantity):
         result.append(qty)
         total_quantity -= qty
     return result
+
+
+# StratX API Place Order Functions
+def placeOrderStratX_NSE(client_ids, strategy_name, symbol, strike, expiry, buyorsell, 
+                         producttype, ordertype, quantity, price=None, right="CE", 
+                         quantity_split=900, order_action="EXECUTION-WITHOUT-MULTIPLER"):
+    """
+    Place order on NSE using StratX API
+    
+    Args:
+        client_ids (list): List of client IDs e.g., ["ETHN842125"]
+        strategy_name (str): Strategy name e.g., "Garuda"
+        symbol (str): Symbol e.g., "NIFTY"
+        strike (int): Strike price e.g., 23000
+        expiry (str): Expiry date in format YYYYMMDD e.g., "20240530"
+        buyorsell (str): "BUY" or "SELL"
+        producttype (str): "INTRADAY" or "DELIVERY"
+        ordertype (str): "LIMIT" or "MARKET"
+        quantity (int): Quantity to trade
+        price (float, optional): Limit price if ordertype is LIMIT
+        right (str): "CE" or "PE" for Call/Put option
+        quantity_split (int): Quantity split value, default 900
+        order_action (str): Order action type
+    
+    Returns:
+        dict: API response
+    """
+    
+    url = "https://uatapi.stratx.in/api/v1/orders/place-order/"
+    
+    payload = json.dumps({
+        "id": "SAURABH03",
+        "secret_key": "wGtt9fr4c6Bz5ev9u1DON8TGGo5l2a1i",
+        "orders": [
+            {
+                "client_ids": client_ids,
+                "strategy_name": strategy_name,
+                "symbol": symbol,
+                "strike": strike,
+                "expiry": expiry,
+                "buyorsell": buyorsell,
+                "producttype": producttype,
+                "ordertype": ordertype,
+                "quantity": quantity,
+                "price": price,
+                "exchange": "NSEFO",
+                "segment": "NFO-OPT",
+                "validity": "DAY",
+                "amoorder": "N",
+                "disclosedquantity": 0,
+                "triggerprice": 0,
+                "lmt_price_inc": 0,
+                "lmt_price_inc_type": "PTS",
+                "lmt_price_attempt": 1,
+                "lmt_price_atmp_sleep": 1000,
+                "lmt_price_alternative": "CANCEL",
+                "opt_auto": False,
+                "autostrike": 0,
+                "autostrike_atm": "SPOT",
+                "sectype": "IND",
+                "right": right,
+                "is_roll_over": False,
+                "roll_over_days": 0,
+                "roll_over_time": "10:00:00",
+                "trigger": "Entry",
+                "quantity_split": quantity_split,
+                "order_action": order_action
+            }
+        ]
+    })
+    
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        response = requests.request("POST", url, headers=headers, data=payload)
+        printt(f"NSE Order Response: {response.text}")
+        return response.json()
+    except Exception as e:
+        printt(f"Error placing NSE order: {e}")
+        return None
+
+
+def placeOrderStratX_BSE(client_ids, strategy_name, symbol, strike, expiry, buyorsell, 
+                         producttype, ordertype, quantity, price=None, right="CE", 
+                         quantity_split=900, order_action="EXECUTION-WITHOUT-MULTIPLER"):
+    """
+    Place order on BSE using StratX API
+    
+    Args:
+        client_ids (list): List of client IDs e.g., ["ETHN842125"]
+        strategy_name (str): Strategy name e.g., "Garuda"
+        symbol (str): Symbol e.g., "SENSEX" or "BANKEX"
+        strike (int): Strike price e.g., 72000
+        expiry (str): Expiry date in format YYYYMMDD e.g., "20240530"
+        buyorsell (str): "BUY" or "SELL"
+        producttype (str): "INTRADAY" or "DELIVERY"
+        ordertype (str): "LIMIT" or "MARKET"
+        quantity (int): Quantity to trade
+        price (float, optional): Limit price if ordertype is LIMIT
+        right (str): "CE" or "PE" for Call/Put option
+        quantity_split (int): Quantity split value, default 900
+        order_action (str): Order action type
+    
+    Returns:
+        dict: API response
+    """
+    url = "https://uatapi.stratx.in/api/v1/orders/place-order/"
+    
+    payload = json.dumps({
+        "id": "SAURABH03",
+        "secret_key": "wGtt9fr4c6Bz5ev9u1DON8TGGo5l2a1i",
+        "orders": [
+            {
+                "client_ids": client_ids,
+                "strategy_name": strategy_name,
+                "symbol": symbol,
+                "strike": strike,
+                "expiry": expiry,
+                "buyorsell": buyorsell,
+                "producttype": producttype,
+                "ordertype": ordertype,
+                "quantity": quantity,
+                "price": price,
+                "exchange": "BSEFO",
+                "segment": "BFO-OPT",
+                "validity": "DAY",
+                "amoorder": "N",
+                "disclosedquantity": 0,
+                "triggerprice": 0,
+                "lmt_price_inc": 0,
+                "lmt_price_inc_type": "PTS",
+                "lmt_price_attempt": 1,
+                "lmt_price_atmp_sleep": 1000,
+                "lmt_price_alternative": "CANCEL",
+                "opt_auto": False,
+                "autostrike": 0,
+                "autostrike_atm": "SPOT",
+                "sectype": "IND",
+                "right": right,
+                "is_roll_over": False,
+                "roll_over_days": 0,
+                "roll_over_time": "10:00:00",
+                "trigger": "Entry",
+                "quantity_split": quantity_split,
+                "order_action": order_action
+            }
+        ]
+    })
+    
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        response = requests.request("POST", url, headers=headers, data=payload)
+        printt(f"BSE Order Response: {response.text}")
+        return response.json()
+    except Exception as e:
+        printt(f"Error placing BSE order: {e}")
+        return None
+    
+
+placeOrderStratX_NSE(
+    client_ids=["H13894"],
+    strategy_name="PrimeTorque",
+    symbol="NIFTY",
+    strike=26000,
+    expiry="20260203",
+    buyorsell="SELL",
+    producttype="INTRADAY",
+    ordertype="LIMIT",
+    quantity=65,
+    right="CE"
+)
+
+# BSE Order
+placeOrderStratX_BSE(
+    client_ids=["H13894"],
+    strategy_name="PrimeTorque",
+    symbol="SENSEX",
+    strike=80700,
+    expiry="20260203",
+    buyorsell="BUY",
+    producttype="INTRADAY",
+    ordertype="MARKET",
+    quantity=65,
+    right="PE"
+)
