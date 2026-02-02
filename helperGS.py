@@ -552,5 +552,43 @@ class StartX:
             printt(f"Error placing BSE order: {e}")
             return None
         
+    
+
+    def getOrderStatus(self,orderId):
+
+        if orderId == 0:
+            return('Order Data not avaiable..!')
+
+        for i in range(10):
+            try:
+                df = pd.read_csv('trades.csv')
+                res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')[0]
+                return res
+            except Exception as e:
+                printt('Error Order()_orderStatus :- ',e,i)
+                time.sleep(2)
+      
 
 
+    def getOrderBookALL():
+        url = f"https://{cre.startX_url}/api/v1/reports/order/fields/?page_size=10&page_number=1"
+        payload = json.dumps({
+            "id": cre.id,
+            "secret_key": cre.secret_key,
+            "client_id": cre.client_id,
+            })
+        headers = {
+        'Content-Type': 'application/json'
+        }
+        for i in range(100):
+            try:
+                response = requests.request("POST", url, headers=headers, data=payload)
+                d = response.json()
+                return(d)
+            except Exception as e:
+                try:
+                    printt(d,'Retrying order status in one sec',i)
+                    time.sleep(1)
+                except Exception as e:
+                    printt('Error in order status, Retrying',i)
+                    time.sleep(1)
