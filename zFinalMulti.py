@@ -27,7 +27,7 @@ H.printt("Starting...")
 H.createLogFile()
 H.checkTime(datetime.time(5, 15, 1))
 
-gsobj = HG.greeksoft()
+# gsobj = HG.greeksoft()
 startObj = HG.StartX()
 
 today = datetime.datetime.today().strftime("%m%d")
@@ -39,7 +39,7 @@ csvPathBSE = cre.pathBSE.format(formatted_date=today)
 def fetch_order_book():
     while True:
         try:
-            book = gsobj.getOrderBookALL()
+            book = startObj.getOrderBookALL()
             pd.DataFrame(book["data"]).to_csv("trades.csv", index=False)
             time.sleep(0.25)
         except:
@@ -58,7 +58,7 @@ def execute_with_retry(place_fn, args, lot_size=60):
         time.sleep(0.25)
 
         for o in orders:
-            d = gsobj.getOrderStatus(o)
+            d = startObj.getOrderStatus(o)
             H.printt(
                 f"Symbol:{d.get('symbol')} | "
                 f"Status:{d.get('order_status')} | "
@@ -79,7 +79,7 @@ def nse_worker():
     while True:
         try:
             t = NSE_QUEUE.get(timeout=1)
-            dt = gsobj.getData(t)
+            # dt = gsobj.getData(t)
 
             execute_with_retry(
                 startObj.placeOrderStratX_NSE,
@@ -118,7 +118,7 @@ def bse_worker():
             t = BSE_QUEUE.get(timeout=1)
 
             action = 'Buy' if t[6] == 'B' else 'Sell'
-            dt = gsobj.getDataBSE(t[4])
+            # dt = gsobj.getDataBSE(t[4])
 
             execute_with_retry(
                 startObj.placeOrderStratX_BSE,
