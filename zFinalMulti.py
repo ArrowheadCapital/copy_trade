@@ -14,8 +14,7 @@ import pandas as pd
 from cryptography.fernet import Fernet
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
-load_dotenv()
+
 
 # ================= RELOAD =================
 importlib.reload(H)
@@ -68,7 +67,7 @@ def execute_with_retry(place_fn, args, lot_size=60):
             if d.get("errorCode") == 17080:
                 args = list(args)
                 # args[3] = int(d["pending_qty"] / lot_size)
-                args[4] = int(d["pending_qty"])
+                # args[4] = int(d["pending_qty"])
             else:
                 return
 
@@ -84,7 +83,7 @@ def nse_worker():
             execute_with_retry(
                 startObj.placeOrderStratX_NSE,
                 [
-                    t[3],
+                    t[3].strip(),
                     'BUY' if t[13] == 1 else 'SELL',
                     t
                 ],
@@ -123,7 +122,7 @@ def bse_worker():
             execute_with_retry(
                 startObj.placeOrderStratX_BSE,
                 [
-                    t[3],
+                    t[3].strip(),
                     action,
                     t
                 ],
