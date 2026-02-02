@@ -423,7 +423,7 @@ class StartX:
                     "strategy_name": strategy_name,
                     "symbol": name,
                     "strike": trade[5],
-                    "expiry": self.to_yyyymmdd(trade[6]), # ddmmyy so convert to yyyymmdd
+                    "expiry": self.to_yyyymmdd(trade[4]), # ddmmyy so convert to yyyymmdd
                     "buyorsell": side,
                     "producttype": producttype,
                     "ordertype": "MARKET",
@@ -508,7 +508,7 @@ class StartX:
                     "strategy_name": strategy_name,
                     "symbol": name,
                     "strike": trade[5],
-                    "expiry": self.to_yyyymmdd(trade[6]), # ddmmyy so convert to yyyymmdd
+                    "expiry": self.to_yyyymmdd(trade[4]), # ddmmyy so convert to yyyymmdd
                     "buyorsell": side,
                     "producttype": producttype,
                     "ordertype": "MARKET",
