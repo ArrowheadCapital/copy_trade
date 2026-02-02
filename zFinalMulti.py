@@ -8,10 +8,10 @@ import time
 import os
 import json
 import threading
-import wmi
+import wmi #type: ignore
 
-import pandas as pd
-from cryptography.fernet import Fernet
+import pandas as pd #type: ignore
+from cryptography.fernet import Fernet #type: ignore
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
 

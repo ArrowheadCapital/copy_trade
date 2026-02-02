@@ -1,8 +1,8 @@
-import requests
+import requests #type: ignore
 import datetime
 import os
 import time
-import pandas as pd
+import pandas as pd #type: ignore
 from io import StringIO
 import json
 import credentials as cre
