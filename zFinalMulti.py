@@ -60,8 +60,8 @@ def execute_with_retry(place_fn, args, lot_size=60):
             d = startObj.getOrderStatus(o)
             H.printt(
                 f"Symbol:{d.get('symbol')} | "
-                f"Status:{d.get('order_status')} | "
-                f"Pending:{d.get('pending_qty')}"
+                f"Status:{d.get('status')} | "
+                f"Pending:{d.get('quantity')}"
             )
 
             if d.get("errorCode") == 17080:
