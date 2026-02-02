@@ -52,7 +52,7 @@ NSE_QUEUE = Queue(maxsize=4000)
 BSE_QUEUE = Queue(maxsize=4000)
 
 # ================= SELF-TRADE SAFE EXECUTION =================
-def execute_with_retry(place_fn, args, lot_size):
+def execute_with_retry(place_fn, args, lot_size=60):
     for _ in range(3):
         orders = place_fn(*args)
         time.sleep(0.25)
@@ -67,7 +67,7 @@ def execute_with_retry(place_fn, args, lot_size):
 
             if d.get("errorCode") == 17080:
                 args = list(args)
-                args[3] = int(d["pending_qty"] / lot_size)
+                # args[3] = int(d["pending_qty"] / lot_size)
                 args[4] = int(d["pending_qty"])
             else:
                 return
