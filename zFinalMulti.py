@@ -14,8 +14,6 @@ import pandas as pd
 from cryptography.fernet import Fernet
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
-load_dotenv()
 
 # ================= RELOAD =================
 importlib.reload(H)
@@ -33,6 +31,9 @@ today = datetime.datetime.today().strftime("%m%d")
 csvPathNSE = cre.pathNSE.format(formatted_date=today)
 csvPathBSE = cre.pathBSE.format(formatted_date=today)
 
+# ================= LICENSE =================
+# License validation removed per request.
+H.printt("License validation skipped")
 
 # ================= ORDERBOOK THREAD =================
 def fetch_order_book():
@@ -54,7 +55,7 @@ BSE_QUEUE = Queue(maxsize=4000)
 def execute_with_retry(place_fn, args, lot_size):
     for _ in range(3):
         orders = place_fn(*args)
-        time.sleep(0.25)
+        time.sleep(0.5)
 
         for o in orders:
             d = gsobj.getOrderStatus(o)

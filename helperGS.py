@@ -19,6 +19,9 @@ bankex = cre.bankex
 midcpniftyFreeze = cre.midcpnifty
 finniftyFreeze = cre.finnifty
 
+iprocli = cre.iprocli
+AccountNumber = cre.AccountNumber
+
 class greeksoft():
     def __init__(self):
         global username
@@ -87,11 +90,11 @@ class greeksoft():
     
         # Convert to a Pandas DataFrame
         df = pd.read_csv(StringIO(raw_data))
-        
-        df = df.reset_index()
+        # df = df.reset_index()
+        df.to_csv('abc.csv', index=False)
         df.columns = ['GreekToken', 'ExchangeToken', 'ExchangeSegMent', 'Series/InstType',
         'Symbol', 'Description', 'ExpiryDate', 'OptionType', 'StrikePrice',
-        'TickSize', 'LotSize', 'TradingSymbol','hello']
+        'TickSize', 'LotSize', 'TradingSymbol', 'SymbolWithExpiry']
 
         self.df = df
         return(df)
@@ -141,7 +144,7 @@ class greeksoft():
             qua = quas[i]
             lot = lots[i]
         
-            for i in range(30):
+            for i in range(1):
                 try:
                     # Request body
                     data = {
@@ -162,7 +165,8 @@ class greeksoft():
                             "qty": str(qua), 
                             "corderid": "3",
                             "amo": "0",
-                            "iprocli": "0",
+                            "iprocli": iprocli,
+                            "AccountNumber": AccountNumber,
                             "gtdExpiry": 0,
                             "is_post_closed": "0",
                             "is_preopen_order": "0",
@@ -176,13 +180,14 @@ class greeksoft():
                             "streaming_type": "NewOrderRequest"
                         }
                     }
+
                     response = requests.post(url, json=data, headers=headers)
                     d = response.json()
                     printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
                     idds.append(d['response']['data']['gorderid'])
                     break
                 except Exception as e:
-                    printt(d,'Retrying orderPlacing in 1 Sec',1)
+                    printt(d, f"Retrying orderPlacing in 1 Sec | Error: {e}", i)
                     time.sleep(1)
 
         return(idds)
@@ -220,7 +225,7 @@ class greeksoft():
             qua = quas[i]
             lot = lots[i]
 
-            for i in range(30):
+            for i in range(1):
                 try:
                 # Request body
                     data = {
@@ -241,7 +246,8 @@ class greeksoft():
                             "qty": str(qua), 
                             "corderid": "3",
                             "amo": "0",
-                            "iprocli": "0",
+                            "iprocli": iprocli,
+                            "AccountNumber": AccountNumber,
                             "gtdExpiry": 0,
                             "is_post_closed": "0",
                             "is_preopen_order": "0",
@@ -262,7 +268,7 @@ class greeksoft():
                     idds.append(d['response']['data']['gorderid'])
                     break
                 except Exception as e:
-                    printt(d,'Retrying orderPlacing in 1 Sec',i)
+                    printt(d, f"Retrying orderPlacing in 1 Sec | Error: {e}", i)
                     time.sleep(1)
 
         return(idds)
@@ -284,7 +290,7 @@ class greeksoft():
         
     def getOrderBookALL(self):
         
-        for i in range(100):
+        for i in range(10):
         
             global urll
             global username
