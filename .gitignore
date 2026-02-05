@@ -1,6 +1,7 @@
 /logs
 *.csv
 *.txt
+!requirements.txt
 
 credentials.py
 

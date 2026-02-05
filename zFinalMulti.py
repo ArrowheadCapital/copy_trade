@@ -42,7 +42,8 @@ def fetch_order_book():
             book = gsobj.getOrderBookALL()
             pd.DataFrame(book["data"]).to_csv("trades.csv", index=False)
             time.sleep(0.25)
-        except:
+        except Exception as e:
+            H.printt(f"OrderBook Error: {e}")
             time.sleep(1)
 
 threading.Thread(target=fetch_order_book, daemon=True).start()
@@ -53,26 +54,29 @@ BSE_QUEUE = Queue(maxsize=4000)
 
 # ================= SELF-TRADE SAFE EXECUTION =================
 def execute_with_retry(place_fn, args, lot_size):
-    for _ in range(3):
-        orders = place_fn(*args)
-        time.sleep(0.5)
+    try:
+        for _ in range(3):
+            orders = place_fn(*args)
+            time.sleep(0.5)
 
-        for o in orders:
-            d = gsobj.getOrderStatus(o)
-            H.printt(
-                f"Symbol:{d.get('symbol')} | "
-                f"Status:{d.get('order_status')} | "
-                f"Pending:{d.get('pending_qty')}"
-            )
+            for o in orders:
+                d = gsobj.getOrderStatus(o)
+                H.printt(
+                    f"Symbol:{d.get('symbol')} | "
+                    f"Status:{d.get('order_status')} | "
+                    f"Pending:{d.get('pending_qty')}"
+                )
 
-            if d.get("errorCode") == 17080:
-                args = list(args)
-                args[3] = int(d["pending_qty"] / lot_size)
-                args[4] = int(d["pending_qty"])
-            else:
-                return
+                if d.get("errorCode") == 17080:
+                    args = list(args)
+                    args[3] = int(d["pending_qty"] / lot_size)
+                    args[4] = int(d["pending_qty"])
+                else:
+                    return
 
-    H.printt("Self-trade retry failed")
+        H.printt("Self-trade retry failed")
+    except Exception as e:
+        H.printt(f"Self-trade retry error: {e}")
 
 # ================= NSE WORKER =================
 def nse_worker():
@@ -130,15 +134,15 @@ def bse_worker():
         except Exception as e:
             H.printt(f"BSE Worker Error: {e}")
 
-# ================= START 100 WORKERS =================
-NSE_EXECUTOR = ThreadPoolExecutor(max_workers=400)
-BSE_EXECUTOR = ThreadPoolExecutor(max_workers=400)
+# ================= START 50 WORKERS =================
+NSE_EXECUTOR = ThreadPoolExecutor(max_workers=50)
+BSE_EXECUTOR = ThreadPoolExecutor(max_workers=50)
 
-for _ in range(400):
+for _ in range(50):
     NSE_EXECUTOR.submit(nse_worker)
     BSE_EXECUTOR.submit(bse_worker)
 
-H.printt("Started 200 NSE workers and 200 BSE workers")
+H.printt("Started 25 NSE workers and 25 BSE workers")
 
 # ================= CSV TRACKERS =================
 # nse_seen = 0
@@ -158,7 +162,8 @@ if os.path.exists(csvPathNSE):
         nse_seen = len(df_init)
         last_nse = df_init
         H.printt(f"NSE copy starts from row {nse_seen}")
-    except:
+    except Exception as e:
+        H.printt(f"NSE init read error: {e}")
         nse_seen = 0
 else:
     nse_seen = 0
@@ -171,7 +176,8 @@ if os.path.exists(csvPathBSE):
         bse_seen = len(df_init)
         last_bse = df_init
         H.printt(f"BSE copy starts from row {bse_seen}")
-    except:
+    except Exception as e:
+        H.printt(f"BSE init read error: {e}")
         bse_seen = 0
 else:
     bse_seen = 0
@@ -186,7 +192,8 @@ while True:
                 df = pd.read_csv(csvPathNSE, header=None, engine="python")
                 # df = df[df[17].str.strip() == cre.clientCodeToCopy]
                 last_nse = df
-            except:
+            except Exception as e:
+                H.printt(f"NSE read error: {e}")
                 df = last_nse
 
             if len(df) > nse_seen:
@@ -200,7 +207,8 @@ while True:
                 df = pd.read_csv(csvPathBSE, sep="|", header=None)
                 # df = df[df[9].str.strip() == cre.clientCodeToCopy]
                 last_bse = df
-            except:
+            except Exception as e:
+                H.printt(f"BSE read error: {e}")
                 df = last_bse
 
             if len(df) > bse_seen:
