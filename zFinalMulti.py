@@ -178,6 +178,8 @@ if os.path.exists(csvPathBSE):
         bse_seen = len(df_init)
         last_bse = df_init
         H.printt(f"BSE copy starts from row {bse_seen}")
+    except pd.errors.EmptyDataError:
+        bse_seen = 0
     except Exception as e:
         H.printt(f"BSE init read error: {e}")
         bse_seen = 0
