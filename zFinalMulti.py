@@ -197,7 +197,6 @@ while True:
                 # df = df[df[17].str.strip() == cre.clientCodeToCopy]
                 last_nse = df
             except Exception as e:
-                H.printt(f"NSE read error: {e}")
                 df = last_nse
 
             if len(df) > nse_seen:
@@ -212,7 +211,6 @@ while True:
                 # df = df[df[9].str.strip() == cre.clientCodeToCopy]
                 last_bse = df
             except Exception as e:
-                H.printt(f"BSE read error: {e}")
                 df = last_bse
 
             if len(df) > bse_seen:
