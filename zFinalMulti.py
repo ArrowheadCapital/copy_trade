@@ -162,6 +162,8 @@ if os.path.exists(csvPathNSE):
         nse_seen = len(df_init)
         last_nse = df_init
         H.printt(f"NSE copy starts from row {nse_seen}")
+    except pd.errors.EmptyDataError:
+        nse_seen = 0
     except Exception as e:
         H.printt(f"NSE init read error: {e}")
         nse_seen = 0
