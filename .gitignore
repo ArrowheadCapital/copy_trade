@@ -1,9 +1,11 @@
 /logs
 *.csv
 *.txt
-
+!requirements.txt
 credentials.py
 
 __pycache__/
 .env
 .venv
+venv
+credentials_greek.py

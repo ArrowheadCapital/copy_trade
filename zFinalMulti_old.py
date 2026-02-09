@@ -1,3 +1,5 @@
+# TO BE DELETED
+
 import importlib
 import Helper as H
 import helperGS as HG
@@ -8,12 +10,13 @@ import time
 import os
 import json
 import threading
-import wmi
+import wmi #type: ignore
 
-import pandas as pd
-from cryptography.fernet import Fernet
+import pandas as pd #type: ignore
+from cryptography.fernet import Fernet #type: ignore
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
+
 
 # ================= RELOAD =================
 importlib.reload(H)
@@ -25,49 +28,35 @@ H.printt("Starting...")
 H.createLogFile()
 H.checkTime(datetime.time(5, 15, 1))
 
-BROKER = cre.broker.upper()
-
-H.printt(f"Broker: {BROKER}")
-
-# WAIT FOR INSTRUMENT FILE UPDATE for StartX (8:50 AM)
+# ===== WAIT FOR INSTRUMENT FILE UPDATE (8:50 AM) =====
 now = datetime.datetime.now().time()
 cutoff = datetime.time(8, 50)
 
-if BROKER == "STARTX":
-    if now < cutoff:
-        H.printt("Instrument master updates at 8:50 AM. Exiting to avoid stale contracts.")
-        exit()
+if now < cutoff:
+    H.printt("Instrument master updates at 8:50 AM. Exiting to avoid stale contracts.")
+    exit()
 
-    # CHECK INSTRUMENT MASTER FILE EXISTS
-    if not cre.optionInstrumentPath or not os.path.exists(cre.optionInstrumentPath):
-        H.printt(f"Instrument file not found: {cre.optionInstrumentPath}")
-        exit() 
+# ===== CHECK INSTRUMENT MASTER FILE EXISTS =====
+if not cre.optionInstrumentPath or not os.path.exists(cre.optionInstrumentPath):
+    H.printt(f"Instrument file not found: {cre.optionInstrumentPath}")
+    exit()
 
-# Initialize the selected broker
-if BROKER == "GREEK":
-    brokerObj = HG.greeksoft()
-elif BROKER == "STARTX":
-    brokerObj = HG.StartX()
-else:
-    raise ValueError("Invalid broker name in credentials.py")
+# gsobj = HG.greeksoft()
+startObj = HG.StartX()
 
 today = datetime.datetime.today().strftime("%m%d")
 csvPathNSE = cre.pathNSE.format(formatted_date=today)
 csvPathBSE = cre.pathBSE.format(formatted_date=today)
 
-# ================= LICENSE =================
-# License validation removed per request.
-H.printt("License validation skipped")
 
 # ================= ORDERBOOK THREAD =================
 def fetch_order_book():
     while True:
         try:
-            book = brokerObj.getOrderBookALL()
+            book = startObj.getOrderBookALL()
             pd.DataFrame(book["data"]).to_csv("trades.csv", index=False)
             time.sleep(0.25)
-        except Exception as e:
-            H.printt(f"OrderBook Error: {e}")
+        except:
             time.sleep(1)
 
 threading.Thread(target=fetch_order_book, daemon=True).start()
@@ -77,53 +66,58 @@ NSE_QUEUE = Queue(maxsize=4000)
 BSE_QUEUE = Queue(maxsize=4000)
 
 # ================= SELF-TRADE SAFE EXECUTION =================
-def execute_with_retry(place_fn, args, lot_size=None):
-    try:
-        for _ in range(3):
-            orders = place_fn(*args)
-            time.sleep(0.5)
+def execute_with_retry(place_fn, args, lot_size=60):
+    for _ in range(3):
+        orders = place_fn(*args)
+        time.sleep(0.25)
 
-            for o in orders:
-                d = brokerObj.getOrderStatus(o)
-                H.printt(
-                    f"Symbol:{d.get('symbol')} | "
-                    f"Status:{d.get('order_status')} | "
-                    f"Pending:{d.get('pending_qty')}"
-                )
+        for o in orders:
+            d = startObj.getOrderStatus(o)
+            H.printt(
+                f"Symbol:{d.get('symbol')} | "
+                f"Status:{d.get('status')} | "
+                f"Pending:{d.get('quantity')}"
+            )
 
-                if d.get("errorCode") == 17080:
-                    if BROKER == 'STARTX':
-                        args = list(args)
-                    else:
-                        args = list(args)
-                        args[3] = int(d["pending_qty"] / lot_size)
-                        args[4] = int(d["pending_qty"])
-                else:
-                    return
+            if d.get("errorCode") == 17080:
+                args = list(args)
+                # args[3] = int(d["pending_qty"] / lot_size)
+                # args[4] = int(d["pending_qty"])
+            else:
+                return
 
-        H.printt("Self-trade retry failed")
-    except Exception as e:
-        H.printt(f"Self-trade retry error: {e}")
+    H.printt("Self-trade retry failed")
 
 # ================= NSE WORKER =================
 def nse_worker():
     while True:
         try:
             t = NSE_QUEUE.get(timeout=1)
+            # dt = gsobj.getData(t)
 
-            if BROKER == "GREEK":
-                dt = brokerObj.getData(t)
-                execute_with_retry(
-                        brokerObj.placeOrder,
-                        [dt.GreekToken, t[13], dt.Symbol, int(t[14]/dt.LotSize), int(t[14]), dt],
-                        dt.LotSize
-                    )
-            else:
-                execute_with_retry(
-                        brokerObj.placeOrderStratX_NSE,
-                        [t[3].strip(), 'BUY' if t[13]==1 else 'SELL', t]
-                    )
-                
+            execute_with_retry(
+                startObj.placeOrderStratX_NSE,
+                [
+                    t[3].strip(),
+                    'BUY' if t[13] == 1 else 'SELL',
+                    t
+                ],
+            )
+
+
+            # execute_with_retry(
+            #     gsobj.placeOrder,
+            #     [
+            #         dt.GreekToken,
+            #         t[13],
+            #         dt.Symbol,
+            #         int(t[14] / dt.LotSize),
+            #         int(t[14]),
+            #         dt
+            #     ],
+            #     dt.LotSize
+            # )
+
             NSE_QUEUE.task_done()
 
         except Empty:
@@ -137,18 +131,31 @@ def bse_worker():
         try:
             t = BSE_QUEUE.get(timeout=1)
 
-            if BROKER == "GREEK":
-                dt = brokerObj.getDataBSE(t[4])
-                execute_with_retry(
-                        brokerObj.placeOrderBSE,
-                        [dt.GreekToken, 'Buy' if t[6]=='B' else 'Sell', dt.Symbol, int(t[7]/dt.LotSize), int(t[7]), dt],
-                        dt.LotSize
-                    )
-            else:
-                execute_with_retry(
-                        brokerObj.placeOrderStratX_BSE,
-                        [t[5].strip(), 'BUY' if t[6]=='B' else 'SELL', t]
-                    )
+            action = 'BUY' if t[6] == 'B' else 'SELL'
+            # dt = gsobj.getDataBSE(t[4])
+
+            execute_with_retry(
+                startObj.placeOrderStratX_BSE,
+                [
+                    t[5].strip(),
+                    action,
+                    t
+                ],
+            )
+
+
+            # execute_with_retry(
+            #     gsobj.placeOrderBSE,
+            #     [
+            #         dt.GreekToken,
+            #         action,
+            #         dt.Symbol,
+            #         int(t[7] / dt.LotSize),
+            #         int(t[7]),
+            #         dt
+            #     ],
+            #     dt.LotSize
+            # )
 
             BSE_QUEUE.task_done()
 
@@ -157,15 +164,15 @@ def bse_worker():
         except Exception as e:
             H.printt(f"BSE Worker Error: {e}")
 
-# ================= START 50 WORKERS =================
-NSE_EXECUTOR = ThreadPoolExecutor(max_workers=50)
-BSE_EXECUTOR = ThreadPoolExecutor(max_workers=50)
+# ================= START 100 WORKERS =================
+NSE_EXECUTOR = ThreadPoolExecutor(max_workers=400)
+BSE_EXECUTOR = ThreadPoolExecutor(max_workers=400)
 
-for _ in range(50):
+for _ in range(400):
     NSE_EXECUTOR.submit(nse_worker)
     BSE_EXECUTOR.submit(bse_worker)
 
-H.printt("Started 25 NSE workers and 25 BSE workers")
+H.printt("Started 200 NSE workers and 200 BSE workers")
 
 # ================= CSV TRACKERS =================
 # nse_seen = 0
@@ -185,10 +192,7 @@ if os.path.exists(csvPathNSE):
         nse_seen = len(df_init)
         last_nse = df_init
         H.printt(f"NSE copy starts from row {nse_seen}")
-    except pd.errors.EmptyDataError:
-        nse_seen = 0
-    except Exception as e:
-        H.printt(f"NSE init read error: {e}")
+    except:
         nse_seen = 0
 else:
     nse_seen = 0
@@ -201,10 +205,7 @@ if os.path.exists(csvPathBSE):
         bse_seen = len(df_init)
         last_bse = df_init
         H.printt(f"BSE copy starts from row {bse_seen}")
-    except pd.errors.EmptyDataError:
-        bse_seen = 0
-    except Exception as e:
-        H.printt(f"BSE init read error: {e}")
+    except:
         bse_seen = 0
 else:
     bse_seen = 0
@@ -219,7 +220,7 @@ while True:
                 df = pd.read_csv(csvPathNSE, header=None, engine="python")
                 # df = df[df[17].str.strip() == cre.clientCodeToCopy]
                 last_nse = df
-            except Exception as e:
+            except:
                 df = last_nse
 
             if len(df) > nse_seen:
@@ -233,7 +234,7 @@ while True:
                 df = pd.read_csv(csvPathBSE, sep="|", header=None)
                 # df = df[df[9].str.strip() == cre.clientCodeToCopy]
                 last_bse = df
-            except Exception as e:
+            except:
                 df = last_bse
 
             if len(df) > bse_seen:
