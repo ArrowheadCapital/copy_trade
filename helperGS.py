@@ -514,6 +514,8 @@ class StartX:
             elif name.upper() == 'FINNIFTY':
                 freez = finniftyFreeze
 
+            price = float(trade[15])
+
             producttype = "DELIVERY" 
             iids = []
 
@@ -531,7 +533,7 @@ class StartX:
                         "producttype": producttype,
                         "ordertype": "LIMIT",
                         "quantity": int(trade[14]*multiplier), 
-                        "price": None,
+                        "price": price,
                         "exchange": "NSEFO",
                         "segment": "NFO-OPT",
                         "validity": "DAY",
