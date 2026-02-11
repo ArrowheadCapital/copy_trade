@@ -29,11 +29,11 @@ BROKER = cre.broker.upper()
 
 H.printt(f"Broker: {BROKER}")
 
-# WAIT FOR INSTRUMENT FILE UPDATE for StartX (8:50 AM)
+# WAIT FOR INSTRUMENT FILE UPDATE for StratX (8:50 AM)
 now = datetime.datetime.now().time()
 cutoff = datetime.time(8, 50)
 
-if BROKER == "STARTX":
+if BROKER == "STRATX":
     if now < cutoff:
         H.printt("Instrument master updates at 8:50 AM. Exiting to avoid stale contracts.")
         exit()
@@ -46,8 +46,8 @@ if BROKER == "STARTX":
 # Initialize the selected broker
 if BROKER == "GREEK":
     brokerObj = HG.greeksoft()
-elif BROKER == "STARTX":
-    brokerObj = HG.StartX()
+elif BROKER == "STRATX":
+    brokerObj = HG.StratX()
 else:
     raise ValueError("Invalid broker name in credentials.py")
 
@@ -187,7 +187,7 @@ def execute_with_retry(place_fn, args, lot_size=None):
                 )
 
                 if d.get("errorCode") == 17080:
-                    if BROKER == 'STARTX':
+                    if BROKER == 'STRATX':
                         args = list(args)
                     else:
                         args = list(args)

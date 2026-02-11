@@ -435,9 +435,9 @@ class greeksoft():
             return None
 
 
-# =========================== STARTX API ==================================
+# =========================== STRATX API ==================================
 
-class StartX:
+class StratX:
 
     inst_df = None
 
@@ -451,13 +451,13 @@ class StartX:
 
     def load_instrument_master(self):
         try:
-            if StartX.inst_df is None:
-                printt("Loading StartX instrument master...")
+            if StratX.inst_df is None:
+                printt("Loading StratX instrument master...")
                 df = pd.read_csv(cre.optionInstrumentPath)
                 df.columns = df.columns.str.strip()
                 df["ExchangeInstrumentID"] = df["ExchangeInstrumentID"].astype(str).str.strip()
                 df["Description"] = df["Description"].astype(str).str.strip()
-                StartX.inst_df = df
+                StratX.inst_df = df
                 printt(f"Instrument master loaded: {len(df)} rows")
         except Exception as e:
             printt(f"Error loading instrument master: {e}")
@@ -466,7 +466,7 @@ class StartX:
     def get_bse_contract_details(self, exchange_instrument_id, description):
         try:
             self.load_instrument_master()
-            df = StartX.inst_df
+            df = StratX.inst_df
 
             row = df[
                 (df["ExchangeInstrumentID"] == str(exchange_instrument_id)) &
@@ -502,7 +502,7 @@ class StartX:
 
     def placeOrderStratX_NSE(self, name, side, trade, strategy_name="PrimeTorque"):
         try:
-            url = f"https://{cre.startX_url}/api/v1/orders/place-order/"
+            url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
             global niftyFreeze
             global bnfFreeze
@@ -585,7 +585,7 @@ class StartX:
             return iids
 
         except Exception as e:
-            printt(f"Error placing StartX NSE order: {e}")
+            printt(f"Error placing StratX NSE order: {e}")
             return []
 
 
@@ -594,7 +594,7 @@ class StartX:
             global sensexFreeze
             global bankex
 
-            url = f"https://{cre.startX_url}/api/v1/orders/place-order/"
+            url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
             exchange_instrument_id = str(trade[4]).strip()
             description = str(trade[5]).strip()
@@ -677,7 +677,7 @@ class StartX:
             return iids
 
         except Exception as e:
-            printt(f"Error placing StartX BSE order: {e}")
+            printt(f"Error placing StratX BSE order: {e}")
             return []
 
 
@@ -694,20 +694,20 @@ class StartX:
                         return res[0]
                     time.sleep(2)
                 except Exception as e:
-                    printt(f"StartX order status retry {i}: {e}")
+                    printt(f"StratX order status retry {i}: {e}")
                     time.sleep(2)
 
             printt(f"No order update for orderId {orderId}")
             return None
 
         except Exception as e:
-            printt(f"Error in StartX getOrderStatus: {e}")
+            printt(f"Error in StratX getOrderStatus: {e}")
             return None
 
 
     def getOrderBookALL(self):
         try:
-            url = f"https://{cre.startX_url}/api/v1/reports/order/fields/?page_size=10&page_number=1"
+            url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size=10&page_number=1"
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
@@ -722,9 +722,9 @@ class StartX:
                     response = requests.request("POST", url, headers=headers, data=payload)
                     return response.json()
                 except Exception as e:
-                    printt(f"StartX orderbook retry {i}: {e}")
+                    printt(f"StratX orderbook retry {i}: {e}")
                     time.sleep(1)
 
         except Exception as e:
-            printt(f"Error in StartX getOrderBookALL: {e}")
+            printt(f"Error in StratX getOrderBookALL: {e}")
             return None
