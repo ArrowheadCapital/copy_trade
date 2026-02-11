@@ -477,14 +477,18 @@ class StartX:
                 raise ValueError(f"BSE Instrument not found: {exchange_instrument_id} | {description}")
 
             row = row.iloc[0]
-            strike = float(row["StrikePrice"])
             expiry = pd.to_datetime(row["ContractExpiration"]).strftime("%Y%m%d")
 
             opt_code = str(row["OptionType"]).strip()
             if opt_code == "3":
                 right = "CE"
+                strike = float(row["StrikePrice"])
             elif opt_code == "4":
                 right = "PE"
+                strike = float(row["StrikePrice"])
+            elif opt_code == "1":
+                right = "FUT"
+                strike = None
             else:
                 raise ValueError(f"Unknown OptionType code: {opt_code}")
 
@@ -516,6 +520,17 @@ class StartX:
 
             price = float(trade[15])
 
+            inst_type = str(trade[2]).strip().upper()
+
+            if inst_type.startswith("FUT"):
+                right = "FUT"
+                segment = "NFO-FUT"
+                strike = None
+            else:
+                right = str(trade[6]).strip().upper()  # CE / PE
+                segment = "NFO-OPT"
+                strike = float(trade[5])
+
             producttype = "DELIVERY" 
             iids = []
 
@@ -527,7 +542,7 @@ class StartX:
                         "client_ids": [cre.client_id],
                         "strategy_name": strategy_name,
                         "symbol": name,
-                        "strike": float(trade[5]),
+                        "strike": strike,
                         "expiry": self.to_yyyymmdd(trade[4]),
                         "buyorsell": side,
                         "producttype": producttype,
@@ -535,7 +550,7 @@ class StartX:
                         "quantity": int(trade[14]*multiplier), 
                         "price": price,
                         "exchange": "NSEFO",
-                        "segment": "NFO-OPT",
+                        "segment": segment,
                         "validity": "DAY",
                         "amoorder": "N",
                         "disclosedquantity": 0,
@@ -546,7 +561,7 @@ class StartX:
                         "lmt_price_atmp_sleep": 1000,
                         "lmt_price_alternative": "CANCEL",
                         "sectype": "IND",
-                        "right": trade[6], # CE/PE/FUT/EQ
+                        "right": right, # CE/PE/FUT/EQ
                         "trigger": "Entry",
                         "quantity_split": freez,
                         "order_action": "EXECUTION-WITHOUT-MULTIPLER"
@@ -605,6 +620,12 @@ class StartX:
             producttype = "DELIVERY" 
             iids = []
 
+            # Decide segment based on instrument type
+            if right == "FUT":
+                segment = "BFO-FUT"
+            else:
+                segment = "BFO-OPT"
+
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
@@ -621,7 +642,7 @@ class StartX:
                         "quantity": int(trade[7]*multiplier),
                         "price": price,
                         "exchange": "BSEFO",
-                        "segment": "BFO-OPT",
+                        "segment": segment,
                         "validity": "DAY",
                         "amoorder": "N",
                         "disclosedquantity": 0,

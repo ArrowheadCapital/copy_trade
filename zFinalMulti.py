@@ -209,8 +209,13 @@ def nse_worker():
 
             symbol = str(t[3]).strip()
             qty = int(t[14])
-            strike = float(t[5])
             side = int(t[13])
+            inst_type = str(t[2]).strip().upper()
+
+            if inst_type.startswith("FUT"):
+                strike = None
+            else:
+                strike = float(t[5])
             
             # Validation checks
             if not validate_trade(symbol, qty, strike):
