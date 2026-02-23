@@ -500,7 +500,7 @@ class StratX:
             return None, None, None, None
 
 
-    def placeOrderStratX_NSE(self, name, side, trade, strategy_name="PrimeTorque"):
+    def placeOrderStratX_NSE(self, name, side, trade, strategy_name="Volatility Core"):
         try:
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
@@ -539,7 +539,7 @@ class StratX:
                 "secret_key": cre.secret_key,
                 "orders": [
                     {
-                        "client_ids": [cre.client_id],
+                        "client_ids": [],
                         "strategy_name": strategy_name,
                         "symbol": name,
                         "strike": strike,
@@ -589,7 +589,7 @@ class StratX:
             return []
 
 
-    def placeOrderStratX_BSE(self, name, side, trade, strategy_name="PrimeTorque"):
+    def placeOrderStratX_BSE(self, name, side, trade, strategy_name="Volatility Core"):
         try:
             global sensexFreeze
             global bankex
@@ -631,7 +631,7 @@ class StratX:
                 "secret_key": cre.secret_key,
                 "orders": [
                     {
-                        "client_ids": [cre.client_id],
+                        "client_ids": [],
                         "strategy_name": strategy_name,
                         "symbol": name,
                         "strike": strike,
@@ -711,7 +711,6 @@ class StratX:
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
-                "client_id": cre.client_id,
                 })
             headers = {
             'Content-Type': 'application/json'
