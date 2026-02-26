@@ -707,7 +707,7 @@ class StratX:
 
     def getOrderBookALL(self):
         try:
-            url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size=10&page_number=1"
+            url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size=1000000"
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
