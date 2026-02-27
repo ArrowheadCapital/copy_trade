@@ -97,6 +97,22 @@ def getFreezeQua(freeze_limit, lot_size, total_quantity):
     except Exception as e:
         printt(f"Error in getFreezeQua: {e}")
         return []
+    
+def round_to_tick(price: float, tick: float) -> float:
+    return round(tick * round(price / tick), 2)
+
+def adjust_price_to_tick(price, tick_size, side, market_order_offset):
+    offset = price * (market_order_offset / 100)
+
+    if price <= 50:
+        offset = 10
+
+    if side == "BUY":
+        price += offset
+    else:
+        price = max(tick_size, price - offset)
+
+    return round_to_tick(price, tick_size)
 
 
 # =========================== GREEKSOFT API ==================================
@@ -440,6 +456,7 @@ class greeksoft():
 class StratX:
 
     inst_df = None
+    market_order_offset = 10
 
     def to_yyyymmdd(self, date_str):
         try:
@@ -478,6 +495,7 @@ class StratX:
 
             row = row.iloc[0]
             expiry = pd.to_datetime(row["ContractExpiration"]).strftime("%Y%m%d")
+            tick_size = float(row["TickSize"])
 
             opt_code = str(row["OptionType"]).strip()
             if opt_code == "3":
@@ -493,11 +511,11 @@ class StratX:
                 raise ValueError(f"Unknown OptionType code: {opt_code}")
 
             symbol = str(row["UnderlyingIndexName"]).strip().upper()
-            return symbol, strike, expiry, right
+            return symbol, strike, expiry, right, tick_size
 
         except Exception as e:
             printt(f"Error in get_bse_contract_details: {e}")
-            return None, None, None, None
+            return None, None, None, None, None
 
 
     def placeOrderStratX_NSE(self, name, side, trade, strategy_name="Volatility Core"):
@@ -519,6 +537,13 @@ class StratX:
                 freez = finniftyFreeze
 
             price = float(trade[15])
+            self.load_instrument_master()
+            row = StratX.inst_df.loc[StratX.inst_df["Name"].str.upper() == name.upper(),"TickSize"]
+            if row.empty:
+                raise ValueError(f"Tick size not found for {name}")
+            tick_size = float(row.iat[0])
+
+            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
 
             inst_type = str(trade[2]).strip().upper()
 
@@ -555,11 +580,11 @@ class StratX:
                         "amoorder": "N",
                         "disclosedquantity": 0,
                         "triggerprice": 0,
-                        "lmt_price_inc": 1,
-                        "lmt_price_inc_type": "PTS",
-                        "lmt_price_attempt": 3,
-                        "lmt_price_atmp_sleep": 1000,
-                        "lmt_price_alternative": "CANCEL",
+                        # "lmt_price_inc": 1,
+                        # "lmt_price_inc_type": "PTS",
+                        # "lmt_price_attempt": 3,
+                        # "lmt_price_atmp_sleep": 1000,
+                        # "lmt_price_alternative": "CANCEL",
                         "sectype": "IND",
                         "right": right, # CE/PE/FUT/EQ
                         "trigger": "Entry",
@@ -599,7 +624,7 @@ class StratX:
             exchange_instrument_id = str(trade[4]).strip()
             description = str(trade[5]).strip()
 
-            symbol, strike, expiry, right = self.get_bse_contract_details(
+            symbol, strike, expiry, right, tick_size = self.get_bse_contract_details(
                 exchange_instrument_id, description
             )
 
@@ -616,6 +641,7 @@ class StratX:
                 raise ValueError(f"Unknown BSE symbol for freeze qty: {symbol}")
 
             price = float(trade[8])
+            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
 
             producttype = "DELIVERY" 
             iids = []
@@ -647,11 +673,11 @@ class StratX:
                         "amoorder": "N",
                         "disclosedquantity": 0,
                         "triggerprice": 0,
-                        "lmt_price_inc": 1,
-                        "lmt_price_inc_type": "PTS",
-                        "lmt_price_attempt": 3,
-                        "lmt_price_atmp_sleep": 1000,
-                        "lmt_price_alternative": "CANCEL",
+                        # "lmt_price_inc": 1,
+                        # "lmt_price_inc_type": "PTS",
+                        # "lmt_price_attempt": 3,
+                        # "lmt_price_atmp_sleep": 1000,
+                        # "lmt_price_alternative": "CANCEL",
                         "sectype": "IND",
                         "right": right, # CE/PE/FUT/EQ
                         "trigger": "Entry",
