@@ -536,14 +536,15 @@ class StratX:
             elif name.upper() == 'FINNIFTY':
                 freez = finniftyFreeze
 
-            price = float(trade[15])
+            # price = float(trade[15])
             self.load_instrument_master()
             row = StratX.inst_df.loc[StratX.inst_df["Name"].str.upper() == name.upper(),"TickSize"]
             if row.empty:
                 raise ValueError(f"Tick size not found for {name}")
             tick_size = float(row.iat[0])
 
-            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
+            # price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
+            price = 0
 
             inst_type = str(trade[2]).strip().upper()
 
@@ -589,7 +590,7 @@ class StratX:
                         "right": right, # CE/PE/FUT/EQ
                         "trigger": "Entry",
                         "quantity_split": freez,
-                        "order_action": "EXECUTION-WITHOUT-MULTIPLER"
+                        "order_action": ""
                     }
                 ]
             })
@@ -640,8 +641,9 @@ class StratX:
             else:
                 raise ValueError(f"Unknown BSE symbol for freeze qty: {symbol}")
 
-            price = float(trade[8])
-            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
+            # price = float(trade[8])
+            # price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
+            price = 0
 
             producttype = "DELIVERY" 
             iids = []
@@ -682,7 +684,7 @@ class StratX:
                         "right": right, # CE/PE/FUT/EQ
                         "trigger": "Entry",
                         "quantity_split": freez,
-                        "order_action": "EXECUTION-WITHOUT-MULTIPLER"
+                        "order_action": ""
                     }
                 ]
             })
