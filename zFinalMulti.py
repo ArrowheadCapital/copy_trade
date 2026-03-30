@@ -14,6 +14,7 @@ import pandas as pd
 from cryptography.fernet import Fernet
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 
 # ================= RELOAD =================
 importlib.reload(H)
@@ -69,8 +70,9 @@ ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BA
 # MAX_POSITION_VALUE = 5000000
 # DAILY_LOSS_LIMIT = -50000
 
-order_timestamps = []
+order_timestamps = deque()
 latency_records = []
+rate_limit_lock = threading.Lock()
 
 # ================= HELPER FUNCTIONS =================
 def read_csv_safely(path, sep=',', max_retries=3):
@@ -122,12 +124,14 @@ def is_symbol_allowed(symbol):
 def check_order_rate_limit():
     global order_timestamps
     now = time.time()
-
-    order_timestamps = [t for t in order_timestamps if now - t < 1]
+    # remove timestamps older than 1 sec
+    while order_timestamps and now - order_timestamps[0] >= 1:
+        order_timestamps.popleft()
 
     if len(order_timestamps) >= MAX_ORDERS_PER_SECOND:
         H.printt("RISK: Order rate exceeded")
         return False
+
     order_timestamps.append(now)
     return True
 
@@ -180,6 +184,9 @@ def execute_with_retry(place_fn, args, lot_size=None):
 
             for o in orders:
                 d = brokerObj.getOrderStatus(o)
+                if not d:
+                    H.printt(f"Order status not available for {o}")
+                    continue
                 H.printt(
                     f"Symbol:{d.get('symbol')} | "
                     f"Status:{d.get('order_status')} | "
@@ -204,7 +211,29 @@ def execute_with_retry(place_fn, args, lot_size=None):
 def nse_worker():
     while True:
         try:
-            t = NSE_QUEUE.get(timeout=1)
+            if not is_market_open():
+                time.sleep(0.5)
+                continue
+
+            allowed = False
+            queue_empty = False
+
+            with rate_limit_lock:
+                queue_empty = NSE_QUEUE.empty()
+
+                if not queue_empty:
+                    allowed = check_order_rate_limit()
+                    if allowed:
+                        t = NSE_QUEUE.get()
+
+            if queue_empty:
+                time.sleep(0.5)
+                continue
+
+            if not allowed:
+                time.sleep(0.1)
+                continue
+
             start_time = time.time()
 
             symbol = str(t[3]).strip()
@@ -225,17 +254,6 @@ def nse_worker():
             
             if not is_symbol_allowed(symbol):
                 H.printt(f"Symbol not whitelisted: {symbol}")
-                NSE_QUEUE.task_done()
-                continue
-            
-            if not is_market_open():
-                H.printt("Market closed, skipping trade")
-                NSE_QUEUE.task_done()
-                continue
-            
-            if not check_order_rate_limit():
-                time.sleep(1)
-                NSE_QUEUE.put(t)  # Re-queue
                 NSE_QUEUE.task_done()
                 continue
             
@@ -275,7 +293,29 @@ def nse_worker():
 def bse_worker():
     while True:
         try:
-            t = BSE_QUEUE.get(timeout=1)
+            if not is_market_open():
+                time.sleep(0.5)
+                continue
+
+            allowed = False
+            queue_empty = False
+
+            with rate_limit_lock:
+                queue_empty = BSE_QUEUE.empty()
+
+                if not queue_empty:
+                    allowed = check_order_rate_limit()
+                    if allowed:
+                        t = BSE_QUEUE.get()
+
+            if queue_empty:
+                time.sleep(0.5)
+                continue
+
+            if not allowed:
+                time.sleep(0.1)
+                continue
+
             start_time = time.time()
 
             symbol = str(t[5]).strip()
@@ -292,17 +332,6 @@ def bse_worker():
             #     H.printt(f"BSE symbol not whitelisted: {symbol}")
             #     BSE_QUEUE.task_done()
             #     continue
-            
-            if not is_market_open():
-                H.printt("Market closed, skipping BSE trade")
-                BSE_QUEUE.task_done()
-                continue
-            
-            if not check_order_rate_limit():
-                time.sleep(1)
-                BSE_QUEUE.put(t)
-                BSE_QUEUE.task_done()
-                continue
 
             # Commented out for future use
             # if not check_circuit_breaker():
