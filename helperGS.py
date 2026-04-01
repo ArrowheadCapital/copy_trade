@@ -193,10 +193,9 @@ class greeksoft():
             df = pd.read_csv(StringIO(raw_data))
             df = df.reset_index()
             df.to_csv('abc.csv', index=False)
-            df.columns = ['GreekToken', 'ExchangeToken', 'ExchangeSegMent', 'Series/InstType',
-            'Symbol', 'Description', 'ExpiryDate', 'OptionType', 'StrikePrice',
-            'TickSize', 'LotSize', 'TradingSymbol', 'SymbolWithExpiry']
-
+            # df.columns = ['GreekToken', 'ExchangeToken', 'ExchangeSegMent', 'Series/InstType',
+            # 'Symbol', 'Description', 'ExpiryDate', 'OptionType', 'StrikePrice',
+            # 'TickSize', 'LotSize', 'TradingSymbol', 'SymbolWithExpiry']
             self.df = df
             return(df)
         except Exception as e:
