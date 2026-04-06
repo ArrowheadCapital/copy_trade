@@ -163,7 +163,25 @@ def fetch_order_book():
     while True:
         try:
             book = brokerObj.getOrderBookALL()
-            pd.DataFrame(book["data"]).to_csv("trades.csv", index=False)
+
+            data = None
+            if isinstance(book, dict):
+                data = book.get("data")
+
+            if data is None:
+                H.printt(f"Book: {book}")
+                H.printt("OrderBook Error: data is None")
+                time.sleep(0.25)
+                continue
+
+            df = pd.DataFrame(data)
+            if df.empty:
+                H.printt(f"Book: {book}")
+                H.printt("OrderBook Error: data is empty")
+                time.sleep(0.25)
+                continue
+
+            df.to_csv("trades.csv", index=False)
             time.sleep(0.25)
         except Exception as e:
             H.printt(f"OrderBook Error: {e}")
@@ -178,7 +196,7 @@ BSE_QUEUE = Queue(maxsize=4000)
 # ================= SELF-TRADE SAFE EXECUTION =================
 def execute_with_retry(place_fn, args, lot_size=None):
     try:
-        for _ in range(3):
+        for _ in range(1):
             orders = place_fn(*args)
             time.sleep(0.5)
 
@@ -450,9 +468,24 @@ while True:
 
                         if len(df) > nse_seen:
                             new_rows = df.iloc[nse_seen:]
-                            for _, row in new_rows.iterrows():
+                            new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
+                            qty_col = 14
+                            group_cols = [col for col in new_rows.columns if col != qty_col]
+
+                            combined_rows = (
+                                new_rows.groupby(group_cols, dropna=False)
+                                .agg({qty_col: "sum"})
+                                .reset_index()
+                            )
+                            combined_rows = combined_rows[new_rows.columns]
+
+                            for row in combined_rows.itertuples(index=False, name=None):
                                 NSE_QUEUE.put(row)
-                            H.printt(f"NSE: Added {len(new_rows)} new trades to queue")
+
+                            H.printt(
+                                f"NSE: Added {len(combined_rows)} combined trades "
+                                f"(from {len(new_rows)} rows)"
+                            )
                             nse_seen = len(df)
 
 
@@ -473,9 +506,24 @@ while True:
 
                         if len(df) > bse_seen:
                             new_rows = df.iloc[bse_seen:]
-                            for _, row in new_rows.iterrows():
+                            new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
+                            qty_col = 7
+                            group_cols = [col for col in new_rows.columns if col != qty_col]
+
+                            combined_rows = (
+                                new_rows.groupby(group_cols, dropna=False)
+                                .agg({qty_col: "sum"})
+                                .reset_index()
+                            )
+                            combined_rows = combined_rows[new_rows.columns]
+
+                            for row in combined_rows.itertuples(index=False, name=None):
                                 BSE_QUEUE.put(row)
-                            H.printt(f"BSE: Added {len(new_rows)} new trades to queue")
+
+                            H.printt(
+                                f"BSE: Added {len(combined_rows)} combined trades "
+                                f"(from {len(new_rows)} rows)"
+                            )
                             bse_seen = len(df)
 
             except Exception as e:
