@@ -62,7 +62,7 @@ H.printt("License validation skipped")
 
 # ================= CONFIG =================
 MAX_WORKERS = 25
-POLL_INTERVAL = 0.5
+POLL_INTERVAL = 0.25
 MAX_ORDERS_PER_SECOND = 10
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
 
