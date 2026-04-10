@@ -169,15 +169,11 @@ def fetch_order_book():
                 data = book.get("data")
 
             if data is None:
-                H.printt(f"Book: {book}")
-                H.printt("OrderBook Error: data is None")
                 time.sleep(0.25)
                 continue
 
             df = pd.DataFrame(data)
             if df.empty:
-                H.printt(f"Book: {book}")
-                H.printt("OrderBook Error: data is empty")
                 time.sleep(0.25)
                 continue
 

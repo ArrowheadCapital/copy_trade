@@ -402,11 +402,9 @@ class greeksoft():
             if not orderId:
                 return None
 
-            last_df = None
             for i in range(10):
                 try:
                     df = pd.read_csv('trades.csv')
-                    last_df = df
                     res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')
                     if res:
                         return res[0]
@@ -414,16 +412,6 @@ class greeksoft():
                 except Exception as e:
                     printt(f"Greeksoft order status retry {i}: {e}")
                     time.sleep(2)
-
-            if last_df is not None:
-                try:
-                    dump_path = f"trades_{orderId}.csv"
-                    last_df.to_csv(dump_path, index=False)
-                    printt(f"Saved orderbook snapshot to {dump_path}")
-                except Exception as e:
-                    printt(f"Failed saving orderbook snapshot for {orderId}: {e}")
-            else:
-                printt(f"Last df for {orderId} was None")
 
             printt(f"No order update for orderId {orderId}")
             return None
