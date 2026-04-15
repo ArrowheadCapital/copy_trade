@@ -14,7 +14,6 @@ import pandas as pd
 from cryptography.fernet import Fernet
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
-from collections import deque
 
 # ================= RELOAD =================
 importlib.reload(H)
@@ -61,18 +60,13 @@ csvPathBSE = cre.pathBSE.format(formatted_date=today)
 H.printt("License validation skipped")
 
 # ================= CONFIG =================
-MAX_WORKERS = 25
+MAX_WORKERS = 10
 POLL_INTERVAL = 0.25
-MAX_ORDERS_PER_SECOND = 10
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
 
 # Risk limits (commented out for now, can enable later)
 # MAX_POSITION_VALUE = 5000000
 # DAILY_LOSS_LIMIT = -50000
-
-order_timestamps = deque()
-latency_records = []
-rate_limit_lock = threading.Lock()
 
 # ================= HELPER FUNCTIONS =================
 def read_csv_safely(path, sep=',', max_retries=3):
@@ -119,21 +113,6 @@ def is_market_open():
 
 def is_symbol_allowed(symbol):
     return str(symbol).upper().strip() in ALLOWED_SYMBOLS
-
-
-def check_order_rate_limit():
-    global order_timestamps
-    now = time.time()
-    # remove timestamps older than 1 sec
-    while order_timestamps and now - order_timestamps[0] >= 1:
-        order_timestamps.popleft()
-
-    if len(order_timestamps) >= MAX_ORDERS_PER_SECOND:
-        H.printt("RISK: Order rate exceeded")
-        return False
-
-    order_timestamps.append(now)
-    return True
 
 
 # Commented out for future use
@@ -194,30 +173,30 @@ def execute_with_retry(place_fn, args, lot_size=None):
     try:
         for _ in range(1):
             orders = place_fn(*args)
-            time.sleep(0.5)
+        #     time.sleep(0.5)
 
-            for o in orders:
-                d = brokerObj.getOrderStatus(o)
-                if not d:
-                    H.printt(f"Order status not available for {o}")
-                    continue
-                H.printt(
-                    f"Symbol:{d.get('symbol')} | "
-                    f"Status:{d.get('order_status')} | "
-                    f"Pending:{d.get('pending_qty')}"
-                )
+        #     for o in orders:
+        #         d = brokerObj.getOrderStatus(o)
+        #         if not d:
+        #             H.printt(f"Order status not available for {o}")
+        #             continue
+        #         H.printt(
+        #             f"Symbol:{d.get('symbol')} | "
+        #             f"Status:{d.get('order_status')} | "
+        #             f"Pending:{d.get('pending_qty')}"
+        #         )
 
-                if d.get("errorCode") == 17080:
-                    if BROKER == 'STRATX':
-                        args = list(args)
-                    else:
-                        args = list(args)
-                        args[3] = int(d["pending_qty"] / lot_size)
-                        args[4] = int(d["pending_qty"])
-                else:
-                    return
+        #         if d.get("errorCode") == 17080:
+        #             if BROKER == 'STRATX':
+        #                 args = list(args)
+        #             else:
+        #                 args = list(args)
+        #                 args[3] = int(d["pending_qty"] / lot_size)
+        #                 args[4] = int(d["pending_qty"])
+        #         else:
+        #             return
 
-        H.printt("Self-trade retry failed")
+        # H.printt("Self-trade retry failed")
     except Exception as e:
         H.printt(f"Self-trade retry error: {e}")
 
@@ -229,26 +208,11 @@ def nse_worker():
                 time.sleep(0.5)
                 continue
 
-            allowed = False
-            queue_empty = False
-
-            with rate_limit_lock:
-                queue_empty = NSE_QUEUE.empty()
-
-                if not queue_empty:
-                    allowed = check_order_rate_limit()
-                    if allowed:
-                        t = NSE_QUEUE.get()
-
-            if queue_empty:
+            if NSE_QUEUE.empty():
                 time.sleep(0.5)
                 continue
 
-            if not allowed:
-                time.sleep(0.1)
-                continue
-
-            start_time = time.time()
+            t = NSE_QUEUE.get()
 
             symbol = str(t[3]).strip()
             qty = int(t[14])
@@ -290,11 +254,6 @@ def nse_worker():
                         brokerObj.placeOrderStratX_NSE,
                         [symbol, 'BUY' if side==1 else 'SELL', t]
                     )
-                
-            # ---- Latency tracking ----
-            latency_records.append((time.time() - start_time) * 1000)
-            if len(latency_records) > 1000:
-                latency_records.pop(0)
 
             NSE_QUEUE.task_done()
 
@@ -311,26 +270,11 @@ def bse_worker():
                 time.sleep(0.5)
                 continue
 
-            allowed = False
-            queue_empty = False
-
-            with rate_limit_lock:
-                queue_empty = BSE_QUEUE.empty()
-
-                if not queue_empty:
-                    allowed = check_order_rate_limit()
-                    if allowed:
-                        t = BSE_QUEUE.get()
-
-            if queue_empty:
+            if BSE_QUEUE.empty():
                 time.sleep(0.5)
                 continue
 
-            if not allowed:
-                time.sleep(0.1)
-                continue
-
-            start_time = time.time()
+            t = BSE_QUEUE.get()
 
             symbol = str(t[5]).strip()
             qty = int(t[7])
@@ -366,11 +310,6 @@ def bse_worker():
                         brokerObj.placeOrderStratX_BSE,
                         [symbol, 'BUY' if side_flag=='B' else 'SELL', t]
                     )
-                
-            # ---- Latency tracking ----
-            latency_records.append((time.time() - start_time) * 1000)
-            if len(latency_records) > 1000:
-                latency_records.pop(0)
 
             BSE_QUEUE.task_done()
 
@@ -388,17 +327,6 @@ for _ in range(MAX_WORKERS):
     BSE_EXECUTOR.submit(bse_worker)
 
 H.printt(f"Started {MAX_WORKERS} NSE workers and {MAX_WORKERS} BSE workers")
-
-# ================= LATENCY MONITOR =================
-def latency_monitor():
-    while True:
-        time.sleep(300) # Every 5 mins
-        if latency_records:
-            lat_sec = [x / 1000 for x in latency_records]
-            avg = sum(lat_sec)/len(lat_sec)
-            H.printt(f"[LATENCY] Avg:{avg:.3f}s | Min:{min(lat_sec):.3f}s | Max:{max(lat_sec):.3f}s")
-
-threading.Thread(target=latency_monitor, daemon=True).start()
 
 # ================= CSV TRACKERS =================
 # nse_seen = 0
@@ -466,12 +394,18 @@ while True:
                             new_rows = df.iloc[nse_seen:]
                             new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
                             qty_col = 14
-                            group_cols = [col for col in new_rows.columns if col != qty_col]
+                            exchange_order_id_col = 23
+                            agg_map = {col: "first" for col in new_rows.columns}
+                            agg_map[qty_col] = "sum"
 
                             combined_rows = (
-                                new_rows.groupby(group_cols, dropna=False)
-                                .agg({qty_col: "sum"})
-                                .reset_index()
+                                new_rows.groupby(
+                                    exchange_order_id_col,
+                                    dropna=False,
+                                    sort=False,
+                                    as_index=False,
+                                )
+                                .agg(agg_map)
                             )
                             combined_rows = combined_rows[new_rows.columns]
 
@@ -504,12 +438,18 @@ while True:
                             new_rows = df.iloc[bse_seen:]
                             new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
                             qty_col = 7
-                            group_cols = [col for col in new_rows.columns if col != qty_col]
+                            exchange_order_id_col = 16
+                            agg_map = {col: "first" for col in new_rows.columns}
+                            agg_map[qty_col] = "sum"
 
                             combined_rows = (
-                                new_rows.groupby(group_cols, dropna=False)
-                                .agg({qty_col: "sum"})
-                                .reset_index()
+                                new_rows.groupby(
+                                    exchange_order_id_col,
+                                    dropna=False,
+                                    sort=False,
+                                    as_index=False,
+                                )
+                                .agg(agg_map)
                             )
                             combined_rows = combined_rows[new_rows.columns]
 

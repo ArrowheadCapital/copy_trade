@@ -6,6 +6,8 @@ import time
 import pandas as pd
 from io import StringIO
 import credentials as cre
+import threading
+from collections import deque
 
 urll = cre.urll
 username = cre.username
@@ -24,6 +26,27 @@ iprocli = cre.iprocli
 AccountNumber = cre.AccountNumber
 
 # =========================== COMMON FUNCTIONS ==================================
+greek_rate_lock = threading.Lock()
+greek_order_timestamps = deque()
+MAX_GREEK_ORDERS_PER_SEC = 8
+
+
+def wait_for_greek_order_slot():
+    while True:
+        with greek_rate_lock:
+            now = time.time()
+
+            while greek_order_timestamps and now - greek_order_timestamps[0] >= 1:
+                greek_order_timestamps.popleft()
+
+            if len(greek_order_timestamps) < MAX_GREEK_ORDERS_PER_SEC:
+                greek_order_timestamps.append(now)
+                return
+
+            wait_time = 1 - (now - greek_order_timestamps[0])
+            printt(f"RATE LIMIT HIT | waiting {wait_time:.3f}s")
+
+        time.sleep(max(wait_time, 0.01))
 
 def getOrderStatus(orderId):
         try:
@@ -295,7 +318,8 @@ class greeksoft():
                                 "streaming_type": "NewOrderRequest"
                             }
                         }
-
+                        
+                        wait_for_greek_order_slot()
                         response = requests.post(url, json=data, headers=headers)
                         d = response.json()
                         printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
@@ -382,6 +406,7 @@ class greeksoft():
                             }
                         }
                     
+                        wait_for_greek_order_slot()
                         response = requests.post(url, json=data, headers=headers)
                         d = response.json()
                         printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
