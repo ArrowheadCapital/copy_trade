@@ -28,7 +28,7 @@ AccountNumber = cre.AccountNumber
 # =========================== COMMON FUNCTIONS ==================================
 greek_rate_lock = threading.Lock()
 greek_order_timestamps = deque()
-MAX_GREEK_ORDERS_PER_SEC = 8
+MAX_GREEK_ORDERS_PER_SEC = 9
 
 
 def wait_for_greek_order_slot():
