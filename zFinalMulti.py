@@ -162,7 +162,7 @@ def fetch_order_book():
             H.printt(f"OrderBook Error: {e}")
             time.sleep(1)
 
-threading.Thread(target=fetch_order_book, daemon=True).start()
+# threading.Thread(target=fetch_order_book, daemon=True).start()
 
 # ================= QUEUES =================
 NSE_QUEUE = Queue(maxsize=4000)

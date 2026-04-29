@@ -8,6 +8,7 @@ from io import StringIO
 import credentials as cre
 import threading
 from collections import deque
+from fetch_circuit import get_exchange_instrument_id, get_circuit_limits
 
 urll = cre.urll
 username = cre.username
@@ -128,7 +129,7 @@ def adjust_price_to_tick(price, tick_size, side, market_order_offset):
     offset = price * (market_order_offset / 100)
 
     if price <= 50:
-        offset = 10
+        offset = 8
 
     if side == "BUY":
         price += offset
@@ -480,7 +481,7 @@ class greeksoft():
 class StratX:
 
     inst_df = None
-    market_order_offset = 10
+    market_order_offset = 8
 
     def to_yyyymmdd(self, date_str):
         try:
@@ -542,6 +543,43 @@ class StratX:
             return None, None, None, None, None
 
 
+    def apply_circuit_clamp(self, price, description):
+        try:
+            instrument_id = get_exchange_instrument_id(description, StratX.inst_df)
+            if not instrument_id:
+                return price
+
+            limits = get_circuit_limits(instrument_id)
+            if not limits:
+                return price
+
+            uc = limits.get("UC")
+            lc = limits.get("LC")
+            ts = limits.get("ts")
+            if uc is None or lc is None or ts is None:
+                return price
+
+            uc = float(uc)
+            lc = float(lc)
+
+            try:
+                tick_time = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S.%f").timestamp()
+            except Exception:
+                tick_time = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S").timestamp()
+
+            if time.time() - tick_time > 300:
+                return price
+
+            if price > uc:
+                return uc
+            if price < lc:
+                return lc
+            return price
+        except Exception as e:
+            printt(f"Error in apply_circuit_clamp: {e}")
+            return price
+
+
     def placeOrderStratX_NSE(self, name, side, trade, strategy_name="Volatility Core"):
         try:
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
@@ -560,15 +598,17 @@ class StratX:
             elif name.upper() == 'FINNIFTY':
                 freez = finniftyFreeze
 
-            # price = float(trade[15])
+            price = float(trade[15])
             self.load_instrument_master()
             row = StratX.inst_df.loc[StratX.inst_df["Name"].str.upper() == name.upper(),"TickSize"]
             if row.empty:
                 raise ValueError(f"Tick size not found for {name}")
             tick_size = float(row.iat[0])
 
-            # price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
-            price = 0
+            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
+            description = str(trade[7]).strip()
+            price = self.apply_circuit_clamp(price, description)
+            # price = 0
 
             inst_type = str(trade[2]).strip().upper()
 
@@ -665,9 +705,10 @@ class StratX:
             else:
                 raise ValueError(f"Unknown BSE symbol for freeze qty: {symbol}")
 
-            # price = float(trade[8])
-            # price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
-            price = 0
+            price = float(trade[8])
+            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
+            price = self.apply_circuit_clamp(price, description)
+            # price = 0
 
             producttype = "DELIVERY" 
             iids = []

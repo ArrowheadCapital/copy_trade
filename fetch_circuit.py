@@ -1,10 +1,15 @@
 import json
+from time import perf_counter
 import redis
 import pandas as pd
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+redis_client = None
 
 
-def get_exchange_instrument_id(description):
+def get_exchange_instrument_id(description, df):
     """
     Filter options_instruments.csv by description and return ExchangeInstrumentID.
     
@@ -15,16 +20,8 @@ def get_exchange_instrument_id(description):
         int or None: The ExchangeInstrumentID if found, None otherwise
     """
     try:
-        csv_path = os.path.join(os.path.dirname(__file__), 'instruments_data', 'options_instruments.csv')
-        
-        if not os.path.exists(csv_path):
-            print(f"CSV file not found at: {csv_path}")
-            return None
-        
-        df = pd.read_csv(csv_path)
-        
         # Filter by Description column
-        filtered = df[df['Description'] == description]
+        filtered = df[df['Description'].astype(str).str.strip() == str(description).strip()]
         
         if filtered.empty:
             print(f"No instrument found with description: {description}")
@@ -37,7 +34,7 @@ def get_exchange_instrument_id(description):
         print(f"Error in get_exchange_instrument_id: {e}")
         return None
 
-def get_circuit_limits(instrument_id, host="DESKTOP-CLI5HO6", port=6379, db=1):
+def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
     """
     Fetch circuit limits (UC and LC) for a given instrument ID from Redis.
     
@@ -51,16 +48,18 @@ def get_circuit_limits(instrument_id, host="DESKTOP-CLI5HO6", port=6379, db=1):
         dict: Dictionary with 'UC' and 'LC' keys, or None if not found
     """
     try:
-        client = redis.Redis(
-            host=host,
-            port=port,
-            db=db,
-            decode_responses=True,
-        )
-        client.ping()
+        global redis_client
+        if redis_client is None:
+            redis_client = redis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                decode_responses=True,
+            )
+            redis_client.ping()
         
         key = f"cache:CIRCUIT_{instrument_id}"
-        raw_value = client.get(key)
+        raw_value = redis_client.get(key)
         
         if raw_value is None:
             print(f"No circuit data found for instrument ID: {instrument_id}")
@@ -81,26 +80,3 @@ def get_circuit_limits(instrument_id, host="DESKTOP-CLI5HO6", port=6379, db=1):
     except Exception as e:
         print(f"Error in get_circuit_limits: {e}")
         return None
-
-#test purpose
-# if __name__ == "__main__":
-#     # Example: Get circuit limits for an instrument
-#     description = "NIFTY26APR23650PE"
-    
-#     # Step 1: Get the ExchangeInstrumentID from description
-#     instrument_id = get_exchange_instrument_id(description)
-    
-#     if instrument_id is not None:
-#         print(f"Description: {description}")
-#         print(f"ExchangeInstrumentID: {instrument_id}")
-        
-#         # Step 2: Get circuit limits (UC and LC)
-#         limits = get_circuit_limits(instrument_id)
-        
-#         if limits:
-#             print(f"Timestamp: {limits['ts']}")
-#             print(f"Upper Circuit (UC): {limits['UC']}")
-#             print(f"Lower Circuit (LC): {limits['LC']}")
-#         else:
-#             print("Could not fetch circuit limits")
-
