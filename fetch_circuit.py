@@ -9,6 +9,19 @@ load_dotenv()
 redis_client = None
 
 
+def get_redis_client(host="100.103.231.7", port=6379, db=1):
+    global redis_client
+    if redis_client is None:
+        redis_client = redis.Redis(
+            host=host,
+            port=port,
+            db=db,
+            decode_responses=True,
+        )
+        redis_client.ping()
+    return redis_client
+
+
 def get_exchange_instrument_id(description, df):
     """
     Filter options_instruments.csv by description and return ExchangeInstrumentID.
@@ -48,18 +61,10 @@ def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
         dict: Dictionary with 'UC' and 'LC' keys, or None if not found
     """
     try:
-        global redis_client
-        if redis_client is None:
-            redis_client = redis.Redis(
-                host=host,
-                port=port,
-                db=db,
-                decode_responses=True,
-            )
-            redis_client.ping()
+        client = get_redis_client(host=host, port=port, db=db)
         
         key = f"cache:CIRCUIT_{instrument_id}"
-        raw_value = redis_client.get(key)
+        raw_value = client.get(key)
         
         if raw_value is None:
             print(f"No circuit data found for instrument ID: {instrument_id}")
