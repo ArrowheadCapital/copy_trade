@@ -601,11 +601,11 @@ class StratX:
                 return None, None
 
             latest_key = max(keys, key=lambda k: int(k.split(":")[-1]))
-            data_list = client.lrange(latest_key, 0, -1)
-            if not data_list:
+            last_item_raw = client.lindex(latest_key, -1)
+            if not last_item_raw:
                 return None, None
 
-            last_item = json.loads(data_list[-1])
+            last_item = json.loads(last_item_raw)
             payload = last_item.get("payload", {})
             ltp = payload.get("LTP")
             avg = payload.get("avg")
