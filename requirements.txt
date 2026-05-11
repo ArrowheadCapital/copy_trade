@@ -16,3 +16,4 @@ tzdata==2025.3
 urllib3==2.6.3
 WMI==1.5.1
 python-dotenv
+redis

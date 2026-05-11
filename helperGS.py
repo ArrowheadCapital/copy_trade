@@ -8,7 +8,7 @@ from io import StringIO
 import credentials as cre
 import threading
 from collections import deque
-from fetch_circuit import get_exchange_instrument_id, get_circuit_limits
+from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_redis_client
 
 urll = cre.urll
 username = cre.username
@@ -580,6 +580,89 @@ class StratX:
             return price
 
 
+    def build_cache_symbol(self, name, expiry, strike, right):
+        try:
+            strike_val = float(strike)
+            if strike_val.is_integer():
+                strike_str = str(int(strike_val))
+            else:
+                strike_str = str(strike).strip()
+            return f"{str(name).strip().upper()}{str(expiry).strip().upper()}{strike_str}{str(right).strip().upper()}"
+        except Exception:
+            return None
+
+
+    def get_redis_ltp_avg(self, cache_symbol):
+        try:
+            client = get_redis_client()
+            pattern = f"cache:{cache_symbol}:*"
+            keys = client.keys(pattern)
+            if not keys:
+                return None, None
+
+            latest_key = max(keys, key=lambda k: int(k.split(":")[-1]))
+            last_item_raw = client.lindex(latest_key, -1)
+            if not last_item_raw:
+                return None, None
+
+            last_item = json.loads(last_item_raw)
+            payload = last_item.get("payload", {})
+            ltp = payload.get("LTP")
+            avg = payload.get("avg")
+
+            if ltp is None or avg is None:
+                return None, None
+
+            return float(ltp), float(avg)
+        except Exception as e:
+            printt(f"Redis tick read error ({cache_symbol}): {e}")
+            return None, None
+
+
+    def price_from_avg_ltp_or_fallback(self, side, base_price, tick_size, description, cache_symbol=None):
+        try:
+            fallback = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
+            fallback = self.apply_circuit_clamp(fallback, description)
+
+            if not cache_symbol:
+                return fallback
+
+            ltp, avg = self.get_redis_ltp_avg(cache_symbol)
+            if ltp is None:
+                return fallback
+
+            offset_ltp = None
+            if ltp is not None:
+                offset_ltp = ltp * (self.market_order_offset / 100)
+                if ltp <= 50:
+                    offset_ltp = 8
+
+            offset_avg = None
+            if avg is not None:
+                offset_avg = avg * (self.market_order_offset / 100)
+                if avg <= 50:
+                    offset_avg = 8
+
+            if avg is None and ltp is not None:
+                if str(side).upper() == "BUY":
+                    raw = ltp + offset_ltp
+                else:
+                    raw = max(float(tick_size), ltp - offset_ltp)
+            elif str(side).upper() == "BUY":
+                raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
+            else:
+                raw = (ltp - offset_ltp) if (avg - offset_avg >= ltp) else (avg - offset_avg)
+                raw = max(float(tick_size), raw)
+
+            price = round_to_tick(raw, float(tick_size))
+            price = self.apply_circuit_clamp(price, description)
+            return price
+        except Exception as e:
+            printt(f"Error in price_from_avg_ltp_or_fallback: {e}")
+            price = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
+            return self.apply_circuit_clamp(price, description)
+
+
     def placeOrderStratX_NSE(self, name, side, trade, strategy_name="Volatility Core"):
         try:
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
@@ -605,9 +688,23 @@ class StratX:
                 raise ValueError(f"Tick size not found for {name}")
             tick_size = float(row.iat[0])
 
-            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
             description = str(trade[7]).strip()
-            price = self.apply_circuit_clamp(price, description)
+            inst_type = str(trade[2]).strip().upper()
+
+            cache_symbol = None
+            if not inst_type.startswith("FUT"):
+                expiry = pd.to_datetime(trade[4]).strftime("%d%b%y").upper()
+                right_tmp = str(trade[6]).strip().upper()
+                strike_tmp = float(trade[5])
+                cache_symbol = self.build_cache_symbol(name, expiry, strike_tmp, right_tmp)
+
+            price = self.price_from_avg_ltp_or_fallback(
+                side=side,
+                base_price=price,
+                tick_size=tick_size,
+                description=description,
+                cache_symbol=cache_symbol
+            )
             # price = 0
 
             inst_type = str(trade[2]).strip().upper()
@@ -706,8 +803,19 @@ class StratX:
                 raise ValueError(f"Unknown BSE symbol for freeze qty: {symbol}")
 
             price = float(trade[8])
-            price = adjust_price_to_tick(price, tick_size, side, self.market_order_offset)
-            price = self.apply_circuit_clamp(price, description)
+
+            cache_symbol = None
+            if right in ("CE", "PE"):
+                expiry_ddmmmyy = pd.to_datetime(expiry, format="%Y%m%d").strftime("%d%b%y").upper()
+                cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, strike, right)
+
+            price = self.price_from_avg_ltp_or_fallback(
+                side=side,
+                base_price=price,
+                tick_size=tick_size,
+                description=description,
+                cache_symbol=cache_symbol
+            )
             # price = 0
 
             producttype = "DELIVERY" 
