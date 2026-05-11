@@ -628,18 +628,32 @@ class StratX:
                 return fallback
 
             ltp, avg = self.get_redis_ltp_avg(cache_symbol)
-            if ltp is None or avg is None:
+            if ltp is None and avg is None:
                 return fallback
 
-            offset_avg = avg * (self.market_order_offset / 100)
-            if avg <= 50:
-                offset_avg = 8
+            offset_ltp = None
+            if ltp is not None:
+                offset_ltp = ltp * (self.market_order_offset / 100)
+                if ltp <= 50:
+                    offset_ltp = 8
 
-            offset_ltp = ltp * (self.market_order_offset / 100)
-            if ltp <= 50:
-                offset_ltp = 8
+            offset_avg = None
+            if avg is not None:
+                offset_avg = avg * (self.market_order_offset / 100)
+                if avg <= 50:
+                    offset_avg = 8
 
-            if str(side).upper() == "BUY":
+            if avg is None and ltp is not None:
+                if str(side).upper() == "BUY":
+                    raw = ltp + offset_ltp
+                else:
+                    raw = max(float(tick_size), ltp - offset_ltp)
+            elif ltp is None and avg is not None:
+                if str(side).upper() == "BUY":
+                    raw = avg + offset_avg
+                else:
+                    raw = max(float(tick_size), avg - offset_avg)
+            elif str(side).upper() == "BUY":
                 raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
             else:
                 raw = (ltp - offset_ltp) if (avg - offset_avg >= ltp) else (avg - offset_avg)
