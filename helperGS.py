@@ -628,7 +628,7 @@ class StratX:
                 return fallback
 
             ltp, avg = self.get_redis_ltp_avg(cache_symbol)
-            if ltp is None and avg is None:
+            if ltp is None:
                 return fallback
 
             offset_ltp = None
@@ -648,11 +648,6 @@ class StratX:
                     raw = ltp + offset_ltp
                 else:
                     raw = max(float(tick_size), ltp - offset_ltp)
-            elif ltp is None and avg is not None:
-                if str(side).upper() == "BUY":
-                    raw = avg + offset_avg
-                else:
-                    raw = max(float(tick_size), avg - offset_avg)
             elif str(side).upper() == "BUY":
                 raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
             else:
