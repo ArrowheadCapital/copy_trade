@@ -499,6 +499,15 @@ class StratX:
                 df.columns = df.columns.str.strip()
                 df["ExchangeInstrumentID"] = df["ExchangeInstrumentID"].astype(str).str.strip()
                 df["Description"] = df["Description"].astype(str).str.strip()
+
+                # Precompute normalized lookup columns once for fast repeated filters
+                df["underlying_index_name_normalized"] = df["UnderlyingIndexName"].astype(str).str.strip().str.upper()
+                df["contract_expiration_yyyymmdd"] = pd.to_datetime(
+                    df["ContractExpiration"], errors="coerce"
+                ).dt.strftime("%Y%m%d")
+                df["strike_price_numeric"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
+                df["option_type_normalized"] = df["OptionType"].astype(str).str.strip().str.upper()
+
                 StratX.inst_df = df
                 printt(f"Instrument master loaded: {len(df)} rows")
         except Exception as e:
@@ -619,23 +628,30 @@ class StratX:
             return None, None
 
 
-    def price_from_avg_ltp_or_fallback(self, side, base_price, tick_size, description, cache_symbol=None):
+    def price_from_avg_ltp_or_fallback(self, side, base_price, tick_size, description, cache_symbol=None, for_otm_strike=False):
         try:
-            fallback = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
-            fallback = self.apply_circuit_clamp(fallback, description)
+            if for_otm_strike:
+                fallback = None
+            else:
+                fallback = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
+                fallback = self.apply_circuit_clamp(fallback, description)
 
             if not cache_symbol:
+                if fallback is None:
+                    raise ValueError("cache_symbol missing for OTM strike pricing")
                 return fallback
 
             ltp, avg = self.get_redis_ltp_avg(cache_symbol)
+
+            if ltp is None and fallback is None:
+                raise ValueError(f"LTP missing in redis for {cache_symbol}")
+
             if ltp is None:
                 return fallback
 
-            offset_ltp = None
-            if ltp is not None:
-                offset_ltp = ltp * (self.market_order_offset / 100)
-                if ltp <= 50:
-                    offset_ltp = 8
+            offset_ltp = ltp * (self.market_order_offset / 100)
+            if ltp <= 50:
+                offset_ltp = 8
 
             offset_avg = None
             if avg is not None:
@@ -643,7 +659,7 @@ class StratX:
                 if avg <= 50:
                     offset_avg = 8
 
-            if avg is None and ltp is not None:
+            if avg is None:
                 if str(side).upper() == "BUY":
                     raw = ltp + offset_ltp
                 else:
@@ -659,11 +675,125 @@ class StratX:
             return price
         except Exception as e:
             printt(f"Error in price_from_avg_ltp_or_fallback: {e}")
+            if for_otm_strike:
+                raise
             price = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
             return self.apply_circuit_clamp(price, description)
 
 
-    def placeOrderStratX_NSE(self, name, side, trade, strategy_name="Volatility Core"):
+    def get_otm_strike(self, symbol, right, strike, offset):
+        try:
+            sym = str(symbol).strip().upper()
+            opt = str(right).strip().upper()
+            base = float(strike)
+            off = int(offset)
+
+            if sym == "NIFTY":
+                step = 50
+            elif sym == "SENSEX":
+                step = 100
+            else:
+                return None
+
+            shift = off * step
+            if opt == "CE":
+                return base + shift
+            if opt == "PE":
+                return base - shift
+            return None
+        except Exception as e:
+            printt(f"Error in get_otm_strike: {e}")
+            return None
+
+
+    def get_otm_description(self, symbol, expiry_yyyymmdd, right, strike):
+        try:
+            self.load_instrument_master()
+            df = StratX.inst_df
+
+            sym = str(symbol).strip().upper()
+            idx_name_map = {
+                "BANKNIFTY": "NIFTY BANK",
+                "FINNIFTY": "NIFTY FIN SERVICE",
+                "MIDCPNIFTY": "NIFTY MID SELECT",
+                "NIFTY": "NIFTY 50",
+                "NIFTYNXT50": "NIFTY NEXT 50",
+            }
+            mapped_sym = idx_name_map.get(sym, sym)
+            opt = str(right).strip().upper()
+            exp = str(expiry_yyyymmdd).strip()
+            stk = float(strike)
+
+            filtered = df[
+                (df["underlying_index_name_normalized"] == mapped_sym) &
+                (df["contract_expiration_yyyymmdd"] == exp) &
+                (df["strike_price_numeric"] == stk)
+            ]
+
+            if opt == "CE":
+                filtered = filtered[filtered["option_type_normalized"] == "3"]
+            elif opt == "PE":
+                filtered = filtered[filtered["option_type_normalized"] == "4"]
+            else:
+                return None
+
+            if filtered.empty:
+                return None
+
+            return str(filtered.iloc[0]["Description"]).strip()
+        except Exception as e:
+            printt(f"Error in get_otm_description: {e}")
+            return None
+
+
+    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez):
+        try:
+            payload = json.dumps({
+                "id": cre.id,
+                "secret_key": cre.secret_key,
+                "orders": [
+                    {
+                        "client_ids": [],
+                        "strategy_name": strategy_name,
+                        "symbol": symbol,
+                        "strike": strike,
+                        "expiry": expiry,
+                        "buyorsell": side,
+                        "producttype": "DELIVERY",
+                        "ordertype": "LIMIT",
+                        "quantity": quantity,
+                        "price": price,
+                        "exchange": exchange,
+                        "segment": segment,
+                        "validity": "DAY",
+                        "amoorder": "N",
+                        "disclosedquantity": 0,
+                        "triggerprice": 0,
+                        # "lmt_price_inc": 1,
+                        # "lmt_price_inc_type": "PTS",
+                        # "lmt_price_attempt": 3,
+                        # "lmt_price_atmp_sleep": 1000,
+                        # "lmt_price_alternative": "CANCEL",
+                        "sectype": "IND",
+                        "right": right,
+                        "trigger": "Entry",
+                        "quantity_split": freez,
+                        "order_action": ""
+                    }
+                ]
+            })
+
+            headers = {'Content-Type': 'application/json'}
+            response = requests.request("POST", url, headers=headers, data=payload)
+            printt(f"{exchange} Order Response: {response.text}")
+            r = response.json()
+            return [r['data'][0]['reference_id']]
+        except Exception as e:
+            printt(f"Error placing {exchange} order: {e}")
+            return []
+
+
+    def placeOrderStratX_NSE(self, name, side, trade, strategy_name=cre.strategy_name):
         try:
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
@@ -718,57 +848,68 @@ class StratX:
                 segment = "NFO-OPT"
                 strike = float(trade[5])
 
-            producttype = "DELIVERY" 
             iids = []
+            strategy_key = str(strategy_name).strip().upper()
+            qty = int(trade[14] * multiplier)
+            expiry_yyyymmdd = self.to_yyyymmdd(trade[4])
 
-            payload = json.dumps({
-                "id": cre.id,
-                "secret_key": cre.secret_key,
-                "orders": [
-                    {
-                        "client_ids": [],
-                        "strategy_name": strategy_name,
-                        "symbol": name,
-                        "strike": strike,
-                        "expiry": self.to_yyyymmdd(trade[4]),
-                        "buyorsell": side,
-                        "producttype": producttype,
-                        "ordertype": "LIMIT",
-                        "quantity": int(trade[14]*multiplier), 
-                        "price": price,
-                        "exchange": "NSEFO",
-                        "segment": segment,
-                        "validity": "DAY",
-                        "amoorder": "N",
-                        "disclosedquantity": 0,
-                        "triggerprice": 0,
-                        # "lmt_price_inc": 1,
-                        # "lmt_price_inc_type": "PTS",
-                        # "lmt_price_attempt": 3,
-                        # "lmt_price_atmp_sleep": 1000,
-                        # "lmt_price_alternative": "CANCEL",
-                        "sectype": "IND",
-                        "right": right, # CE/PE/FUT/EQ
-                        "trigger": "Entry",
-                        "quantity_split": freez,
-                        "order_action": ""
-                    }
-                ]
-            })
-            
-            headers = {
-                'Content-Type': 'application/json'
-            }
+            if strategy_key == "VOLATILITY CORE" and right in ("CE", "PE") and strike is not None:
+                iids.extend(self.place_stratx_single_order(
+                    url, strategy_name, name, strike, expiry_yyyymmdd, side, qty, price,
+                    "NSEFO", segment, right, freez
+                ))
 
-            try:
-                response = requests.request("POST", url, headers=headers, data=payload)
-                printt(f"NSE Order Response: {response.text}")
-                r = response.json()
-                iids.append(r['data'][0]['reference_id'])
-            except Exception as e:
-                printt(f"Error placing NSE order: {e}")
-                return []
-            
+                otm_strike = self.get_otm_strike(name, right, strike, offset=2)
+                if otm_strike is None:
+                    printt(f"VOLATILITYCORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
+                else:
+                    expiry_ddmmmyy = pd.to_datetime(trade[4]).strftime("%d%b%y").upper()
+                    otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
+                    otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
+                    if not otm_description:
+                        raise ValueError(f"VOLATILITYCORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
+                    otm_price = self.price_from_avg_ltp_or_fallback(
+                        side=side,
+                        base_price=None,
+                        tick_size=tick_size,
+                        description=otm_description,
+                        cache_symbol=otm_cache_symbol,
+                        for_otm_strike=True
+                    )
+                    iids.extend(self.place_stratx_single_order(
+                        url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
+                        "NSEFO", "NFO-OPT", right, freez
+                    ))
+
+            elif strategy_key == "IMPULSE CORE" and right in ("CE", "PE") and strike is not None:
+                otm_strike = self.get_otm_strike(name, right, strike, offset=1)
+                if otm_strike is None:
+                    raise ValueError(f"IMPULSECORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
+
+                expiry_ddmmmyy = pd.to_datetime(trade[4]).strftime("%d%b%y").upper()
+                otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
+                otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
+                if not otm_description:
+                    raise ValueError(f"IMPULSECORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
+                otm_price = self.price_from_avg_ltp_or_fallback(
+                    side=side,
+                    base_price=None,
+                    tick_size=tick_size,
+                    description=otm_description,
+                    cache_symbol=otm_cache_symbol,
+                    for_otm_strike=True
+                )
+                iids.extend(self.place_stratx_single_order(
+                    url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
+                    "NSEFO", "NFO-OPT", right, freez
+                ))
+
+            else:
+                iids.extend(self.place_stratx_single_order(
+                    url, strategy_name, name, strike, expiry_yyyymmdd, side, qty, price,
+                    "NSEFO", segment, right, freez
+                ))
+
             return iids
 
         except Exception as e:
@@ -776,7 +917,7 @@ class StratX:
             return []
 
 
-    def placeOrderStratX_BSE(self, name, side, trade, strategy_name="Volatility Core"):
+    def placeOrderStratX_BSE(self, name, side, trade, strategy_name=cre.strategy_name):
         try:
             global sensexFreeze
             global bankex
@@ -818,7 +959,6 @@ class StratX:
             )
             # price = 0
 
-            producttype = "DELIVERY" 
             iids = []
 
             # Decide segment based on instrument type
@@ -827,54 +967,66 @@ class StratX:
             else:
                 segment = "BFO-OPT"
 
-            payload = json.dumps({
-                "id": cre.id,
-                "secret_key": cre.secret_key,
-                "orders": [
-                    {
-                        "client_ids": [],
-                        "strategy_name": strategy_name,
-                        "symbol": name,
-                        "strike": strike,
-                        "expiry": expiry, 
-                        "buyorsell": side,
-                        "producttype": producttype,
-                        "ordertype": "LIMIT",
-                        "quantity": int(trade[7]*multiplier),
-                        "price": price,
-                        "exchange": "BSEFO",
-                        "segment": segment,
-                        "validity": "DAY",
-                        "amoorder": "N",
-                        "disclosedquantity": 0,
-                        "triggerprice": 0,
-                        # "lmt_price_inc": 1,
-                        # "lmt_price_inc_type": "PTS",
-                        # "lmt_price_attempt": 3,
-                        # "lmt_price_atmp_sleep": 1000,
-                        # "lmt_price_alternative": "CANCEL",
-                        "sectype": "IND",
-                        "right": right, # CE/PE/FUT/EQ
-                        "trigger": "Entry",
-                        "quantity_split": freez,
-                        "order_action": ""
-                    }
-                ]
-            })
-            
-            headers = {
-                'Content-Type': 'application/json'
-            }
-            
-            try:
-                response = requests.request("POST", url, headers=headers, data=payload)
-                printt(f"BSE Order Response: {response.text}")
-                r = response.json()
-                iids.append(r['data'][0]['reference_id'])
-            except Exception as e:
-                printt(f"Error placing BSE order: {e}")
-                return []
-            
+            strategy_key = str(strategy_name).strip().upper()
+            qty = int(trade[7] * multiplier)
+
+            if strategy_key == "VOLATILITY CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
+                iids.extend(self.place_stratx_single_order(
+                    url, strategy_name, name, strike, expiry, side, qty, price,
+                    "BSEFO", segment, right, freez
+                ))
+
+                otm_strike = self.get_otm_strike(symbol, right, strike, offset=2)
+                if otm_strike is None:
+                    printt(f"VOLATILITYCORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
+                else:
+                    expiry_ddmmmyy = pd.to_datetime(expiry, format="%Y%m%d").strftime("%d%b%y").upper()
+                    otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
+                    otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
+                    if not otm_description:
+                        raise ValueError(f"VOLATILITYCORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
+                    otm_price = self.price_from_avg_ltp_or_fallback(
+                        side=side,
+                        base_price=None,
+                        tick_size=tick_size,
+                        description=otm_description,
+                        cache_symbol=otm_cache_symbol,
+                        for_otm_strike=True
+                    )
+                    iids.extend(self.place_stratx_single_order(
+                        url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
+                        "BSEFO", "BFO-OPT", right, freez
+                    ))
+
+            elif strategy_key == "IMPULSE CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
+                otm_strike = self.get_otm_strike(symbol, right, strike, offset=1)
+                if otm_strike is None:
+                    raise ValueError(f"IMPULSECORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
+
+                expiry_ddmmmyy = pd.to_datetime(expiry, format="%Y%m%d").strftime("%d%b%y").upper()
+                otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
+                otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
+                if not otm_description:
+                    raise ValueError(f"IMPULSECORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
+                otm_price = self.price_from_avg_ltp_or_fallback(
+                    side=side,
+                    base_price=None,
+                    tick_size=tick_size,
+                    description=otm_description,
+                    cache_symbol=otm_cache_symbol,
+                    for_otm_strike=True
+                )
+                iids.extend(self.place_stratx_single_order(
+                    url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
+                    "BSEFO", "BFO-OPT", right, freez
+                ))
+
+            else:
+                iids.extend(self.place_stratx_single_order(
+                    url, strategy_name, name, strike, expiry, side, qty, price,
+                    "BSEFO", segment, right, freez
+                ))
+
             return iids
 
         except Exception as e:
