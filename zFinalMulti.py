@@ -8,12 +8,16 @@ import time
 import os
 import json
 import threading
-import wmi
 
 import pandas as pd
-from cryptography.fernet import Fernet
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
+try:
+    from file_watcher import start_file_watcher
+    file_watcher_import_error = None
+except Exception as e:
+    start_file_watcher = None
+    file_watcher_import_error = e
 
 # ================= RELOAD =================
 importlib.reload(H)
@@ -60,7 +64,7 @@ csvPathBSE = cre.pathBSE.format(formatted_date=today)
 H.printt("License validation skipped")
 
 # ================= CONFIG =================
-MAX_WORKERS = 10
+MAX_WORKERS = 40
 POLL_INTERVAL = 0.25
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
 
@@ -151,6 +155,12 @@ def fetch_order_book():
                 time.sleep(0.25)
                 continue
 
+            if BROKER == "STRATX":
+                try:
+                    brokerObj.retry_failed_orderbook_orders(data)
+                except Exception as retry_error:
+                    H.printt(f"StratX orderbook retry processor error: {retry_error}")
+
             df = pd.DataFrame(data)
             if df.empty:
                 time.sleep(0.25)
@@ -209,10 +219,20 @@ def nse_worker():
                 continue
 
             if NSE_QUEUE.empty():
-                time.sleep(0.5)
+                time.sleep(0.001)
                 continue
 
-            t = NSE_QUEUE.get()
+            item = NSE_QUEUE.get()
+
+            if BROKER == "STRATX":
+                t, csv_read_ts = item
+                timing_ctx = {
+                    "worker_dequeue_ts": time.perf_counter(),
+                }
+            else:
+                t = item
+                csv_read_ts = None
+                timing_ctx = None
 
             symbol = str(t[3]).strip()
             qty = int(t[14])
@@ -252,7 +272,7 @@ def nse_worker():
             else:
                 execute_with_retry(
                         brokerObj.placeOrderStratX_NSE,
-                        [symbol, 'BUY' if side==1 else 'SELL', t]
+                        [symbol, 'BUY' if side==1 else 'SELL', t, csv_read_ts, timing_ctx]
                     )
 
             NSE_QUEUE.task_done()
@@ -271,10 +291,19 @@ def bse_worker():
                 continue
 
             if BSE_QUEUE.empty():
-                time.sleep(0.5)
+                time.sleep(0.001)
                 continue
 
-            t = BSE_QUEUE.get()
+            item = BSE_QUEUE.get()
+            if BROKER == "STRATX":
+                t, csv_read_ts = item
+                timing_ctx = {
+                    "worker_dequeue_ts": time.perf_counter(),
+                }
+            else:
+                t = item
+                csv_read_ts = None
+                timing_ctx = None
 
             symbol = str(t[5]).strip()
             qty = int(t[7])
@@ -308,7 +337,7 @@ def bse_worker():
             else:
                 execute_with_retry(
                         brokerObj.placeOrderStratX_BSE,
-                        [symbol, 'BUY' if side_flag=='B' else 'SELL', t]
+                        [symbol, 'BUY' if side_flag=='B' else 'SELL', t, csv_read_ts, timing_ctx]
                     )
 
             BSE_QUEUE.task_done()
@@ -317,6 +346,12 @@ def bse_worker():
             continue
         except Exception as e:
             H.printt(f"BSE Worker Error: {e}")
+
+# ================= PRE-LOAD STRATX INSTRUMENT MASTER =================
+if BROKER == "STRATX":
+    brokerObj.load_instrument_master()
+    brokerObj.start_retry_state_saver()
+    brokerObj.warmup_stratx_sessions()
 
 # ================= START 50 WORKERS =================
 NSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -329,16 +364,11 @@ for _ in range(MAX_WORKERS):
 H.printt(f"Started {MAX_WORKERS} NSE workers and {MAX_WORKERS} BSE workers")
 
 # ================= CSV TRACKERS =================
-# nse_seen = 0
-# bse_seen = 0
-# last_nse = pd.DataFrame()
-# last_bse = pd.DataFrame()
-
-# ================= CSV TRACKERS =================
 last_nse = pd.DataFrame()
 last_bse = pd.DataFrame()
 nse_last_mtime = 0
 bse_last_mtime = 0
+csv_state_lock = threading.Lock()
 
 # NSE
 if os.path.exists(csvPathNSE):
@@ -375,103 +405,142 @@ else:
     bse_seen = 0
 
 
+def process_nse_csv():
+    global nse_seen, last_nse, nse_last_mtime
+    if not os.path.exists(csvPathNSE):
+        return
+    try:
+        current_mtime = os.path.getmtime(csvPathNSE)
+        with csv_state_lock:
+            if current_mtime <= nse_last_mtime:
+                return
+
+        df = read_csv_safely(csvPathNSE)
+        if df is None:
+            return
+
+        with csv_state_lock:
+            if current_mtime <= nse_last_mtime:
+                return
+            nse_last_mtime = current_mtime
+            last_nse = df
+            if len(df) <= nse_seen:
+                return
+            new_rows = df.iloc[nse_seen:]
+            nse_seen = len(df)
+
+        new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
+
+        qty_col = 14
+        exchange_order_id_col = 23
+        agg_map = {col: "first" for col in new_rows.columns}
+        agg_map[qty_col] = "sum"
+        
+        combined_rows = (
+            new_rows.groupby(
+                exchange_order_id_col,
+                dropna=False,
+                sort=False,
+                as_index=False,
+            )
+            .agg(agg_map)
+        )
+        combined_rows = combined_rows[new_rows.columns]
+        
+        for row in combined_rows.itertuples(index=False, name=None):
+            if BROKER == "STRATX":
+                NSE_QUEUE.put((row, time.perf_counter()))
+            else:
+                NSE_QUEUE.put(row)
+        
+        H.printt(f"NSE: Added {len(combined_rows)} combined trades from {len(new_rows)} rows")
+
+    except Exception as e:
+        H.printt(f"NSE file error: {e}")
+
+
+def process_bse_csv():
+    global bse_seen, last_bse, bse_last_mtime
+    if not os.path.exists(csvPathBSE):
+        return
+    try:
+        current_mtime = os.path.getmtime(csvPathBSE)
+        with csv_state_lock:
+            if current_mtime <= bse_last_mtime:
+                return
+
+        df = read_csv_safely(csvPathBSE, sep="|")
+        if df is None:
+            return
+
+        with csv_state_lock:
+            if current_mtime <= bse_last_mtime:
+                return
+            bse_last_mtime = current_mtime
+            last_bse = df
+            if len(df) <= bse_seen:
+                return
+            new_rows = df.iloc[bse_seen:]
+            bse_seen = len(df)
+
+        new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
+
+        qty_col = 7
+        exchange_order_id_col = 16
+        agg_map = {col: "first" for col in new_rows.columns}
+        agg_map[qty_col] = "sum"
+        
+        combined_rows = (
+            new_rows.groupby(
+                exchange_order_id_col,
+                dropna=False,
+                sort=False,
+                as_index=False,
+            )
+            .agg(agg_map)
+        )
+        combined_rows = combined_rows[new_rows.columns]
+        
+        for row in combined_rows.itertuples(index=False, name=None):
+            if BROKER == "STRATX":
+                BSE_QUEUE.put((row, time.perf_counter()))
+            else:
+                BSE_QUEUE.put(row)
+        
+        H.printt(f"BSE: Added {len(combined_rows)} combined trades from {len(new_rows)} rows")
+
+    except Exception as e:
+        H.printt(f"BSE file error: {e}")
+
+
+file_observer = None
+if start_file_watcher is not None:
+    file_observer = start_file_watcher(
+        csvPathNSE,
+        csvPathBSE,
+        on_nse_change=process_nse_csv,
+        on_bse_change=process_bse_csv,
+    )
+if file_observer is not None:
+    H.printt("File watcher started - zero-sleep signal detection active")
+else:
+    if file_watcher_import_error is not None:
+        H.printt(f"File watcher import failed: {file_watcher_import_error}")
+    H.printt("File watcher failed to start - fallback polling active")
+
+FALLBACK_POLL_INTERVAL = 5.0
+
 # ================= MAIN PRODUCER LOOP =================
 while True:
     try:
-        # -------- NSE --------
-        if os.path.exists(csvPathNSE):
-            try:
-                current_mtime = os.path.getmtime(csvPathNSE)
-
-                if current_mtime > nse_last_mtime:
-                    nse_last_mtime = current_mtime
-
-                    df = read_csv_safely(csvPathNSE)
-                    if df is not None:
-                        last_nse = df
-
-                        if len(df) > nse_seen:
-                            new_rows = df.iloc[nse_seen:]
-                            new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
-                            qty_col = 14
-                            exchange_order_id_col = 23
-                            agg_map = {col: "first" for col in new_rows.columns}
-                            agg_map[qty_col] = "sum"
-
-                            combined_rows = (
-                                new_rows.groupby(
-                                    exchange_order_id_col,
-                                    dropna=False,
-                                    sort=False,
-                                    as_index=False,
-                                )
-                                .agg(agg_map)
-                            )
-                            combined_rows = combined_rows[new_rows.columns]
-
-                            for row in combined_rows.itertuples(index=False, name=None):
-                                NSE_QUEUE.put(row)
-
-                            H.printt(
-                                f"NSE: Added {len(combined_rows)} combined trades "
-                                f"(from {len(new_rows)} rows)"
-                            )
-                            nse_seen = len(df)
-
-
-            except Exception as e:
-                H.printt(f"NSE file error: {e}")
-
-        # -------- BSE --------
-        if os.path.exists(csvPathBSE):
-            try:
-                current_mtime = os.path.getmtime(csvPathBSE)
-
-                if current_mtime > bse_last_mtime:
-                    bse_last_mtime = current_mtime
-
-                    df = read_csv_safely(csvPathBSE, sep="|")
-                    if df is not None:
-                        last_bse = df
-
-                        if len(df) > bse_seen:
-                            new_rows = df.iloc[bse_seen:]
-                            new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
-                            qty_col = 7
-                            exchange_order_id_col = 16
-                            agg_map = {col: "first" for col in new_rows.columns}
-                            agg_map[qty_col] = "sum"
-
-                            combined_rows = (
-                                new_rows.groupby(
-                                    exchange_order_id_col,
-                                    dropna=False,
-                                    sort=False,
-                                    as_index=False,
-                                )
-                                .agg(agg_map)
-                            )
-                            combined_rows = combined_rows[new_rows.columns]
-
-                            for row in combined_rows.itertuples(index=False, name=None):
-                                BSE_QUEUE.put(row)
-
-                            H.printt(
-                                f"BSE: Added {len(combined_rows)} combined trades "
-                                f"(from {len(new_rows)} rows)"
-                            )
-                            bse_seen = len(df)
-
-            except Exception as e:
-                H.printt(f"BSE file error: {e}")
+        process_nse_csv()
+        process_bse_csv()
 
         # -------- HEALTH LOG --------
         if NSE_QUEUE.qsize() > 200 or BSE_QUEUE.qsize() > 200:
-            H.printt(
-                f"Queue Load | NSE:{NSE_QUEUE.qsize()} | BSE:{BSE_QUEUE.qsize()}"
-            )
+            H.printt(f"Queue Load | NSE:{NSE_QUEUE.qsize()} | BSE:{BSE_QUEUE.qsize()}")
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(FALLBACK_POLL_INTERVAL)
 
     except Exception as e:
         H.printt(f"Main Loop Error: {e}")

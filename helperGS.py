@@ -3,33 +3,40 @@ import requests
 import datetime
 import os
 import time
+import uuid
+import atexit
+import random
 import pandas as pd
 from io import StringIO
 import credentials as cre
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_redis_client
+from async_logger import createLogFile as async_create_log_file
+from async_logger import printt as async_printt
 
-urll = cre.urll
-username = cre.username
-pw = cre.pw
-multiplier = cre.multiplier
-authurl = cre.authurl
+urll = getattr(cre, "urll", None)
+username = getattr(cre, "username", None)
+pw = getattr(cre, "pw", None)
+multiplier = getattr(cre, "multiplier", None)
+authurl = getattr(cre, "authurl", None)
 
-niftyFreeze = cre.niftyFreeze
-bnfFreeze = cre.bnfFreeze
-sensexFreeze = cre.sensexFreeze
-bankex = cre.bankex
-midcpniftyFreeze = cre.midcpnifty
-finniftyFreeze = cre.finnifty
+niftyFreeze = getattr(cre, "niftyFreeze", None)
+bnfFreeze = getattr(cre, "bnfFreeze", None)
+sensexFreeze = getattr(cre, "sensexFreeze", None)
+bankex = getattr(cre, "bankex", None)
+midcpniftyFreeze = getattr(cre, "midcpnifty", None)
+finniftyFreeze = getattr(cre, "finnifty", None)
 
-iprocli = cre.iprocli
-AccountNumber = cre.AccountNumber
+iprocli = getattr(cre, "iprocli", None)
+AccountNumber = getattr(cre, "AccountNumber", None)
 
 # =========================== COMMON FUNCTIONS ==================================
 greek_rate_lock = threading.Lock()
 greek_order_timestamps = deque()
 MAX_GREEK_ORDERS_PER_SEC = 9
+log_lock = threading.Lock()
 
 
 def wait_for_greek_order_slot():
@@ -67,44 +74,13 @@ def getOrderStatus(orderId):
             return None
 
 def printt(*args, **kwargs):
-    timestamp = datetime.datetime.now().strftime("[%H:%M:%S] :")
-    print(timestamp, *args, **kwargs)
-    saveInLogFile(*args, **kwargs)
+    async_printt(*args, **kwargs)
 
 def saveInLogFile(*args, **kwargs):
-    try:
-        timestamp = datetime.datetime.now().strftime("[%H:%M:%S] :")
-        today = datetime.datetime.now().strftime("%d_%m_%y")
-        file_path = f'logs/{today}.txt'
-        args_str = ' '.join(map(str, args))
-        kwargs_str = ' '.join(f'{k}={v}' for k, v in kwargs.items())
-        content = f'{timestamp} {args_str} {kwargs_str}'
-        with open(file_path, 'a') as file:
-            file.write(content + '\n')
-    except Exception as e:
-        pass
+    async_printt(*args, **kwargs)
 
 def createLogFile():
-    try:
-        today = datetime.datetime.now().strftime("%d_%m_%y")
-        directory = 'logs'
-        filename = f'{today}.txt'
-        # Ensure the directory exists
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        
-        # Full path to the file
-        filepath = os.path.join(directory, filename)
-        
-        if not os.path.isfile(filepath):
-            # Create a blank file
-            with open(filepath, 'w') as file:
-                pass
-            printt(f"Created blank file: {filepath}")
-        else:
-            printt(f"File already exists: {filepath}")
-    except Exception as e:
-        printt(f"Error in createLogFile: {e}")
+    async_create_log_file()
 
 def getFreezeQua(freeze_limit, lot_size, total_quantity):
     try:
@@ -121,7 +97,7 @@ def getFreezeQua(freeze_limit, lot_size, total_quantity):
     except Exception as e:
         printt(f"Error in getFreezeQua: {e}")
         return []
-    
+
 def round_to_tick(price: float, tick: float) -> float:
     return round(tick * round(price / tick), 2)
 
@@ -129,7 +105,7 @@ def adjust_price_to_tick(price, tick_size, side, market_order_offset):
     offset = price * (market_order_offset / 100)
 
     if price <= 50:
-        offset = 8
+        offset = market_order_offset
 
     if side == "BUY":
         price += offset
@@ -196,7 +172,7 @@ class greeksoft():
         except Exception as e:
             printt(f"Error in login: {e}, {data}")
             return None
-    
+
 
     def getInstrument(self):
         try:
@@ -212,7 +188,7 @@ class greeksoft():
             response = requests.get(url, headers=headers)
 
             raw_data = response.text.strip()
-        
+
             # Convert to a Pandas DataFrame
             df = pd.read_csv(StringIO(raw_data))
             df = df.reset_index()
@@ -225,7 +201,7 @@ class greeksoft():
         except Exception as e:
             printt(f"Error in getInstrument: {e}")
             return None
-    
+
 
     def getData(self,t):
         try:
@@ -238,7 +214,7 @@ class greeksoft():
         except Exception as e:
             printt(f"Error in getData: {e}")
             return None
-    
+
 
     def getDataBSE(self,t):
         try:
@@ -282,7 +258,7 @@ class greeksoft():
             for i in range(len(quas)):
                 qua = quas[i]
                 lot = lots[i]
-            
+
                 for i in range(1):
                     try:
                         # Request body
@@ -301,7 +277,7 @@ class greeksoft():
                                 "lot": str(lot),
                                 "order_type": "2",
                                 "product": "0",
-                                "qty": str(qua), 
+                                "qty": str(qua),
                                 "corderid": "3",
                                 "amo": "0",
                                 "iprocli": iprocli,
@@ -319,7 +295,7 @@ class greeksoft():
                                 "streaming_type": "NewOrderRequest"
                             }
                         }
-                        
+
                         wait_for_greek_order_slot()
                         response = requests.post(url, json=data, headers=headers)
                         d = response.json()
@@ -388,7 +364,7 @@ class greeksoft():
                                 "lot": str(lot),
                                 "order_type": "2",
                                 "product": "0",
-                                "qty": str(qua), 
+                                "qty": str(qua),
                                 "corderid": "3",
                                 "amo": "0",
                                 "iprocli": iprocli,
@@ -406,7 +382,7 @@ class greeksoft():
                                 "streaming_type": "NewOrderRequest"
                             }
                         }
-                    
+
                         wait_for_greek_order_slot()
                         response = requests.post(url, json=data, headers=headers)
                         d = response.json()
@@ -441,16 +417,16 @@ class greeksoft():
 
             printt(f"No order update for orderId {orderId}")
             return None
-        
+
         except Exception as e:
             printt(f"Error in Greeksoft getOrderStatus: {e}")
             return None
-        
+
 
     def getOrderBookALL(self):
         try:
             for i in range(10):
-            
+
                 global urll
                 global username
 
@@ -481,24 +457,404 @@ class greeksoft():
 class StratX:
 
     inst_df = None
+    inst_df_lock = threading.Lock()
     market_order_offset = 8
+    tick_size_by_name = {}
+    bse_contract_by_id_desc = {}
+    otm_description_by_key = {}
+    retry_instrument_by_key = {}
+    expiry_yyyymmdd_cache = {}
+    expiry_ddmmmyy_cache = {}
+    expiry_cache_lock = threading.Lock()
+    instrument_names_to_load = {"NIFTY", "SENSEX"}
+    redis_ltp_avg_cache = {}
+    redis_ltp_avg_cache_ttl = 0.2
+    stratx_order_workers = 20
+    stratx_request_timeout = 5
+    stratx_http_max_attempts = 1
+    stratx_http_retry_sleep = 0.3
+    stratx_thread_local = threading.local()
+    stratx_order_pool = ThreadPoolExecutor(
+        max_workers=stratx_order_workers,
+        thread_name_prefix="stratx_order"
+    )
+    retry_state_file = "state.json"
+    retry_state_save_interval = 1
+    max_orderbook_retries = 1
+    retry_state_lock = threading.Lock()
+    retry_state_dirty = False
+    retry_state_loaded = False
+    retry_state_saver_started = False
+    retry_state = {}
+    future_root_ids = {}
+
+    def get_stratx_session(self):
+        try:
+            session = getattr(StratX.stratx_thread_local, "session", None)
+            if session is None:
+                session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=10,
+                    pool_maxsize=10,
+                    pool_block=False,
+                )
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                StratX.stratx_thread_local.session = session
+            return session
+        except Exception as e:
+            raise RuntimeError(f"Error creating StratX HTTP session: {e}")
+
+    def warmup_single_stratx_session(self, worker_index, url, headers, payload):
+        try:
+            session = self.get_stratx_session()
+            start_ts = time.perf_counter()
+            response = session.post(
+                url,
+                headers=headers,
+                data=payload,
+                timeout=StratX.stratx_request_timeout
+            )
+            elapsed_ms = (time.perf_counter() - start_ts) * 1000
+            return {
+                "ok": True,
+                "worker_index": worker_index,
+                "status_code": response.status_code,
+                "elapsed_ms": elapsed_ms,
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "worker_index": worker_index,
+                "error": str(e),
+            }
+
+    def warmup_stratx_sessions(self):
+        try:
+            url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size=1&page_number=1"
+            payload = json.dumps({
+                "id": cre.id,
+                "secret_key": cre.secret_key,
+            })
+            headers = {"Content-Type": "application/json"}
+
+            futures = [
+                StratX.stratx_order_pool.submit(
+                    self.warmup_single_stratx_session,
+                    worker_index,
+                    url,
+                    headers,
+                    payload
+                )
+                for worker_index in range(StratX.stratx_order_workers)
+            ]
+
+            ok_count = 0
+            fail_count = 0
+            max_http_ms = 0.0
+            for future in futures:
+                result = future.result()
+                if result.get("ok"):
+                    ok_count += 1
+                    max_http_ms = max(max_http_ms, result.get("elapsed_ms", 0.0))
+                else:
+                    fail_count += 1
+                    printt(f"STRATX_SESSION_WARMUP_FAILED | worker={result.get('worker_index')} | error={result.get('error')}")
+
+            printt(f"STRATX_SESSION_WARMUP_DONE | workers={StratX.stratx_order_workers} | ok={ok_count} | failed={fail_count} | max_http={max_http_ms:.1f}ms")
+        except Exception as e:
+            printt(f"Error warming StratX sessions: {e}")
+
+    def get_retry_state_date(self):
+        return datetime.datetime.now().strftime("%Y%m%d")
+
+    def get_empty_retry_state(self):
+        return {
+            "date": self.get_retry_state_date(),
+            "reference_id_to_root_id": {},
+            "retry_by_root": {},
+        }
+    
+    def normalize_retry_by_root_state(self, retry_by_root):
+        try:
+            normalized = {}
+            if not isinstance(retry_by_root, dict):
+                return normalized
+
+            for root_order_id, root_state in retry_by_root.items():
+                if not isinstance(root_state, dict):
+                    continue
+
+                retry_count_by_client = root_state.get("retry_count_by_client", {})
+                if not isinstance(retry_count_by_client, dict):
+                    retry_count_by_client = {}
+
+                processed_refs_by_client = root_state.get("processed_refs_by_client", {})
+                if not isinstance(processed_refs_by_client, dict):
+                    processed_refs_by_client = {}
+
+                normalized_retry_counts = {}
+                for client_id, count in retry_count_by_client.items():
+                    client_key = str(client_id).strip()
+                    if not client_key:
+                        continue
+                    try:
+                        normalized_retry_counts[client_key] = int(count)
+                    except Exception:
+                        normalized_retry_counts[client_key] = 0
+
+                normalized_processed_refs = {}
+                for client_id, refs in processed_refs_by_client.items():
+                    client_key = str(client_id).strip()
+                    if not client_key:
+                        continue
+                    if isinstance(refs, list):
+                        normalized_processed_refs[client_key] = set(str(ref).strip() for ref in refs if str(ref).strip())
+                    elif isinstance(refs, set):
+                        normalized_processed_refs[client_key] = refs
+                    else:
+                        normalized_processed_refs[client_key] = set()
+
+                normalized[str(root_order_id)] = {
+                    "retry_count_by_client": normalized_retry_counts,
+                    "processed_refs_by_client": normalized_processed_refs,
+                }
+
+            return normalized
+        except Exception as e:
+            printt(f"STRATX_RETRY_STATE_NORMALIZE_FAILED | error={e}")
+            return {}
+
+    def serialize_retry_by_root_state(self, retry_by_root):
+        try:
+            serialized = {}
+            if not isinstance(retry_by_root, dict):
+                return serialized
+
+            for root_order_id, root_state in retry_by_root.items():
+                if not isinstance(root_state, dict):
+                    continue
+
+                retry_count_by_client = root_state.get("retry_count_by_client", {})
+                processed_refs_by_client = root_state.get("processed_refs_by_client", {})
+
+                serialized[str(root_order_id)] = {
+                    "retry_count_by_client": dict(retry_count_by_client) if isinstance(retry_count_by_client, dict) else {},
+                    "processed_refs_by_client": {
+                        str(client_id): sorted(list(refs)) if isinstance(refs, set) else list(refs if isinstance(refs, list) else [])
+                        for client_id, refs in (processed_refs_by_client.items() if isinstance(processed_refs_by_client, dict) else [])
+                    },
+                }
+
+            return serialized
+        except Exception as e:
+            printt(f"STRATX_RETRY_STATE_SERIALIZE_FAILED | error={e}")
+            return {}
+
+    def get_retry_root_state(self, root_order_id):
+        retry_by_root = StratX.retry_state.setdefault("retry_by_root", {})
+        root_state = retry_by_root.setdefault(
+            str(root_order_id),
+            {
+                "retry_count_by_client": {},
+                "processed_refs_by_client": {},
+            },
+        )
+        if not isinstance(root_state.get("retry_count_by_client"), dict):
+            root_state["retry_count_by_client"] = {}
+        if not isinstance(root_state.get("processed_refs_by_client"), dict):
+            root_state["processed_refs_by_client"] = {}
+        return root_state
+
+    def load_retry_state(self):
+        try:
+            today = self.get_retry_state_date()
+            state = None
+            if os.path.exists(StratX.retry_state_file):
+                try:
+                    with open(StratX.retry_state_file, "r") as state_file:
+                        state = json.load(state_file)
+                except Exception as e:
+                    printt(f"STRATX_RETRY_STATE_LOAD_FAILED | error={e}")
+
+            state_needs_save = False
+            if not isinstance(state, dict) or state.get("date") != today:
+                state = self.get_empty_retry_state()
+                state_needs_save = True
+            else:
+                state = {
+                    "date": today,
+                    "reference_id_to_root_id": state.get("reference_id_to_root_id", {}) if isinstance(state.get("reference_id_to_root_id"), dict) else {},
+                    "retry_by_root": self.normalize_retry_by_root_state(state.get("retry_by_root", {})),
+                }
+
+            with StratX.retry_state_lock:
+                StratX.retry_state = state
+                StratX.retry_state_loaded = True
+                StratX.retry_state_dirty = state_needs_save or not os.path.exists(StratX.retry_state_file)
+
+            printt(f"STRATX_RETRY_STATE_LOADED | refs={len(state['reference_id_to_root_id'])} | roots={len(state['retry_by_root'])}")
+        except Exception as e:
+            printt(f"Error loading StratX retry state: {e}")
+            with StratX.retry_state_lock:
+                StratX.retry_state = self.get_empty_retry_state()
+                StratX.retry_state_loaded = True
+                StratX.retry_state_dirty = True
+
+    def get_retry_state_snapshot(self):
+        with StratX.retry_state_lock:
+            if not StratX.retry_state_loaded:
+                StratX.retry_state = self.get_empty_retry_state()
+                StratX.retry_state_loaded = True
+                StratX.retry_state_dirty = True
+            return {
+                "date": StratX.retry_state.get("date", self.get_retry_state_date()),
+                "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
+                "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
+            }
+
+    def save_retry_state_now(self):
+        try:
+            with StratX.retry_state_lock:
+                if not StratX.retry_state_loaded:
+                    StratX.retry_state = self.get_empty_retry_state()
+                    StratX.retry_state_loaded = True
+
+                state_snapshot = {
+                    "date": StratX.retry_state.get("date", self.get_retry_state_date()),
+                    "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
+                    "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
+                }
+                StratX.retry_state_dirty = False
+
+            temp_path = f"{StratX.retry_state_file}.tmp"
+            with open(temp_path, "w") as state_file:
+                json.dump(state_snapshot, state_file)
+            os.replace(temp_path, StratX.retry_state_file)
+        except Exception as e:
+            with StratX.retry_state_lock:
+                StratX.retry_state_dirty = True
+            printt(f"STRATX_RETRY_STATE_SAVE_FAILED | error={e}")
+
+    def retry_state_saver_loop(self):
+        while True:
+            try:
+                time.sleep(StratX.retry_state_save_interval)
+                with StratX.retry_state_lock:
+                    should_save = StratX.retry_state_dirty
+                if should_save:
+                    self.save_retry_state_now()
+            except Exception as e:
+                printt(f"STRATX_RETRY_STATE_SAVER_ERROR | error={e}")
+                time.sleep(1)
+
+    def start_retry_state_saver(self):
+        try:
+            if not StratX.retry_state_loaded:
+                self.load_retry_state()
+
+            with StratX.retry_state_lock:
+                if StratX.retry_state_saver_started:
+                    return
+                StratX.retry_state_saver_started = True
+
+            saver_thread = threading.Thread(target=self.retry_state_saver_loop, daemon=True)
+            saver_thread.start()
+            atexit.register(self.save_retry_state_now)
+            printt("STRATX_RETRY_STATE_SAVER_STARTED")
+        except Exception as e:
+            printt(f"Error starting StratX retry state saver: {e}")
+
+    def register_future_root_id(self, future, root_order_id):
+        try:
+            with StratX.retry_state_lock:
+                StratX.future_root_ids[future] = root_order_id
+                self.get_retry_root_state(root_order_id)
+                StratX.retry_state_dirty = True
+        except Exception as e:
+            printt(f"STRATX_FUTURE_ROOT_REGISTER_FAILED | root_id={root_order_id} | error={e}")
+
+    def register_reference_root_id(self, future, reference_id):
+        try:
+            with StratX.retry_state_lock:
+                root_order_id = StratX.future_root_ids.pop(future, None)
+                if not root_order_id:
+                    printt(f"STRATX_REFERENCE_ROOT_MISSING | ref_id={reference_id}")
+                    return
+
+                reference_map = StratX.retry_state.setdefault("reference_id_to_root_id", {})
+                reference_map[str(reference_id)] = root_order_id
+                self.get_retry_root_state(root_order_id)
+                StratX.retry_state_dirty = True
+
+        except Exception as e:
+            printt(f"STRATX_REFERENCE_ROOT_REGISTER_FAILED | ref_id={reference_id} | error={e}")
 
     def to_yyyymmdd(self, date_str):
+        key = str(date_str).strip().upper()
+        cached = StratX.expiry_yyyymmdd_cache.get(key)
+        if cached is not None:
+            return cached
         try:
-            return datetime.datetime.strptime(date_str.strip().upper(), "%d%b%Y").strftime("%Y%m%d")
-        except Exception as e:
-            printt(f"Date conversion error: {e}")
-            return None
+            if len(key) == 8 and key.isdigit():
+                value = key
+            else:
+                value = datetime.datetime.strptime(key, "%d%b%Y").strftime("%Y%m%d")
+        except Exception:
+            try:
+                value = pd.to_datetime(date_str).strftime("%Y%m%d")
+            except Exception as e:
+                printt(f"Date conversion error: {e}")
+                return None
+        with StratX.expiry_cache_lock:
+            StratX.expiry_yyyymmdd_cache[key] = value
+        return value
+
+
+    def to_ddmmmyy(self, date_str):
+        key = str(date_str).strip().upper()
+        cached = StratX.expiry_ddmmmyy_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            if len(key) == 8 and key.isdigit():
+                value = datetime.datetime.strptime(key, "%Y%m%d").strftime("%d%b%y").upper()
+            elif len(key) == 7:
+                value = datetime.datetime.strptime(key, "%d%b%y").strftime("%d%b%y").upper()
+            else:
+                value = datetime.datetime.strptime(key, "%d%b%Y").strftime("%d%b%y").upper()
+        except Exception:
+            try:
+                value = pd.to_datetime(date_str).strftime("%d%b%y").upper()
+            except Exception as e:
+                printt(f"Date conversion error: {e}")
+                return None
+        with StratX.expiry_cache_lock:
+            StratX.expiry_ddmmmyy_cache[key] = value
+        return value
 
 
     def load_instrument_master(self):
-        try:
-            if StratX.inst_df is None:
+        if StratX.inst_df is not None:
+            return
+        with StratX.inst_df_lock:
+            if StratX.inst_df is not None:
+                return
+            try:
                 printt("Loading StratX instrument master...")
                 df = pd.read_csv(cre.optionInstrumentPath)
                 df.columns = df.columns.str.strip()
+                if "Name" in df.columns and StratX.instrument_names_to_load:
+                    names_to_load = {str(name).strip().upper() for name in StratX.instrument_names_to_load}
+                    before_filter_rows = len(df)
+                    name_normalized = df["Name"].astype(str).str.strip().str.upper()
+                    df = df[name_normalized.isin(names_to_load)].copy()
+                    printt(f"Instrument master filtered: {before_filter_rows} -> {len(df)} rows for names={','.join(sorted(names_to_load))}")
                 df["ExchangeInstrumentID"] = df["ExchangeInstrumentID"].astype(str).str.strip()
                 df["Description"] = df["Description"].astype(str).str.strip()
+                df["exchange_segment_normalized"] = df["ExchangeSegment"].astype(str).str.strip().str.upper()
+                df["name_normalized"] = df["Name"].astype(str).str.strip().str.upper()
+                df["tick_size_numeric"] = pd.to_numeric(df["TickSize"], errors="coerce")
 
                 # Precompute normalized lookup columns once for fast repeated filters
                 df["underlying_index_name_normalized"] = df["UnderlyingIndexName"].astype(str).str.strip().str.upper()
@@ -508,20 +864,76 @@ class StratX:
                 df["strike_price_numeric"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
                 df["option_type_normalized"] = df["OptionType"].astype(str).str.strip().str.upper()
 
+                tick_size_by_name = {}
+                for row_name, tick_size in df[["name_normalized", "tick_size_numeric"]].itertuples(index=False, name=None):
+                    if row_name and pd.notna(tick_size) and row_name not in tick_size_by_name:
+                        tick_size_by_name[row_name] = float(tick_size)
+
+                bse_contract_by_id_desc = {}
+                otm_description_by_key = {}
+                retry_instrument_by_key = {}
+                for row in df[[
+                    "ExchangeSegment", "ExchangeInstrumentID", "Description", "Name", "UnderlyingIndexName",
+                    "underlying_index_name_normalized", "contract_expiration_yyyymmdd",
+                    "option_type_normalized", "strike_price_numeric", "tick_size_numeric",
+                ]].itertuples(index=False, name=None):
+                    (
+                        exchange_segment, exchange_instrument_id, description, name, underlying_name, underlying_norm,
+                        expiry_yyyymmdd, option_type, strike_price, tick_size,
+                    ) = row
+                    desc = str(description).strip()
+                    opt = str(option_type).strip().upper()
+                    if opt == "3":
+                        right = "CE"
+                        strike = float(strike_price) if pd.notna(strike_price) else None
+                    elif opt == "4":
+                        right = "PE"
+                        strike = float(strike_price) if pd.notna(strike_price) else None
+                    elif opt == "1":
+                        right = "FUT"
+                        strike = None
+                    else:
+                        continue
+
+                    symbol = str(underlying_name).strip().upper()
+                    name_symbol = str(name).strip().upper()
+                    exchange_segment = str(exchange_segment).strip().upper()
+                    expiry = str(expiry_yyyymmdd).strip()
+                    tick = float(tick_size) if pd.notna(tick_size) else None
+                    if tick is not None and expiry and expiry.lower() != "nan":
+                        bse_contract_by_id_desc[(str(exchange_instrument_id).strip(), desc)] = (
+                            symbol, strike, expiry, right, tick
+                        )
+                        retry_key = (exchange_segment, name_symbol, expiry, right, strike)
+                        retry_instrument_by_key[retry_key] = (desc, tick)
+
+                    if right in ("CE", "PE") and strike is not None and expiry and expiry.lower() != "nan":
+                        otm_description_by_key[(str(underlying_norm).strip().upper(), expiry, right, strike)] = desc
+
+                StratX.tick_size_by_name = tick_size_by_name
+                StratX.bse_contract_by_id_desc = bse_contract_by_id_desc
+                StratX.otm_description_by_key = otm_description_by_key
+                StratX.retry_instrument_by_key = retry_instrument_by_key
                 StratX.inst_df = df
                 printt(f"Instrument master loaded: {len(df)} rows")
-        except Exception as e:
-            printt(f"Error loading instrument master: {e}")
+            except Exception as e:
+                printt(f"Error loading instrument master: {e}")
 
 
     def get_bse_contract_details(self, exchange_instrument_id, description):
         try:
             self.load_instrument_master()
+            exchange_instrument_id = str(exchange_instrument_id).strip()
+            description = str(description).strip()
+            cached = StratX.bse_contract_by_id_desc.get((exchange_instrument_id, description))
+            if cached is not None:
+                return cached
+
             df = StratX.inst_df
 
             row = df[
-                (df["ExchangeInstrumentID"] == str(exchange_instrument_id)) &
-                (df["Description"] == str(description))
+                (df["ExchangeInstrumentID"] == exchange_instrument_id) &
+                (df["Description"] == description)
             ]
 
             if row.empty:
@@ -603,26 +1015,31 @@ class StratX:
 
     def get_redis_ltp_avg(self, cache_symbol):
         try:
+            tt0 = time.perf_counter()
+            cache_key = str(cache_symbol).strip().upper()
+            cached = StratX.redis_ltp_avg_cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_result = cached
+                if tt0 - cached_at <= StratX.redis_ltp_avg_cache_ttl:
+                    return cached_result
+
             client = get_redis_client()
-            pattern = f"cache:{cache_symbol}:*"
-            keys = client.keys(pattern)
-            if not keys:
+            key = f"cache:LTP_{cache_key}"
+            raw_value = client.get(key)
+            if not raw_value:
                 return None, None
 
-            latest_key = max(keys, key=lambda k: int(k.split(":")[-1]))
-            last_item_raw = client.lindex(latest_key, -1)
-            if not last_item_raw:
-                return None, None
-
-            last_item = json.loads(last_item_raw)
-            payload = last_item.get("payload", {})
+            data = json.loads(raw_value)
+            payload = data.get("payload", {})
             ltp = payload.get("LTP")
             avg = payload.get("avg")
 
             if ltp is None or avg is None:
                 return None, None
-
-            return float(ltp), float(avg)
+            tt1 = time.perf_counter()
+            result = (float(ltp), float(avg))
+            StratX.redis_ltp_avg_cache[cache_key] = (tt1, result)
+            return result
         except Exception as e:
             printt(f"Redis tick read error ({cache_symbol}): {e}")
             return None, None
@@ -634,11 +1051,12 @@ class StratX:
                 fallback = None
             else:
                 fallback = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
+                # return fallback
                 fallback = self.apply_circuit_clamp(fallback, description)
 
             if not cache_symbol:
                 if fallback is None:
-                    raise ValueError("cache_symbol missing for OTM strike pricing")
+                    raise ValueError(f"cache_symbol missing while fallback pricing is disabled for: {description}")
                 return fallback
 
             ltp, avg = self.get_redis_ltp_avg(cache_symbol)
@@ -651,13 +1069,13 @@ class StratX:
 
             offset_ltp = ltp * (self.market_order_offset / 100)
             if ltp <= 50:
-                offset_ltp = 8
+                offset_ltp = self.market_order_offset
 
             offset_avg = None
             if avg is not None:
                 offset_avg = avg * (self.market_order_offset / 100)
                 if avg <= 50:
-                    offset_avg = 8
+                    offset_avg = self.market_order_offset
 
             if avg is None:
                 if str(side).upper() == "BUY":
@@ -709,7 +1127,6 @@ class StratX:
     def get_otm_description(self, symbol, expiry_yyyymmdd, right, strike):
         try:
             self.load_instrument_master()
-            df = StratX.inst_df
 
             sym = str(symbol).strip().upper()
             idx_name_map = {
@@ -723,6 +1140,11 @@ class StratX:
             opt = str(right).strip().upper()
             exp = str(expiry_yyyymmdd).strip()
             stk = float(strike)
+            cached = StratX.otm_description_by_key.get((mapped_sym, exp, opt, stk))
+            if cached is not None:
+                return cached
+
+            df = StratX.inst_df
 
             filtered = df[
                 (df["underlying_index_name_normalized"] == mapped_sym) &
@@ -745,15 +1167,458 @@ class StratX:
             printt(f"Error in get_otm_description: {e}")
             return None
 
-
-    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez):
+    def update_stratx_payload_price(self, payload, price):
         try:
+            payload_data = json.loads(payload)
+            orders = payload_data.get("orders")
+            if not orders or not isinstance(orders, list):
+                raise ValueError("Missing orders in StratX payload")
+            orders[0]["price"] = price
+            return json.dumps(payload_data)
+        except Exception as e:
+            raise RuntimeError(f"Error updating StratX payload price: {e}")
+
+    def recalculate_stratx_http_retry_price(self, order_info):
+        try:
+            symbol = str(order_info.get("symbol", "")).strip().upper()
+            exchange = str(order_info.get("exchange", "")).strip().upper()
+            right = str(order_info.get("right", "")).strip().upper()
+            side = str(order_info.get("side", "")).strip().upper()
+            expiry = str(order_info.get("expiry", "")).strip()
+            strike = order_info.get("strike")
+            base_price = float(order_info.get("price", 0))
+
+            if not symbol or not exchange or not right or not side or not expiry:
+                raise ValueError(f"Missing HTTP retry price fields: {order_info}")
+
+            if right == "FUT":
+                strike = None
+            else:
+                strike = float(strike)
+
+            pricing_symbol = self.get_retry_pricing_symbol(symbol)
+            description, tick_size = self.get_retry_instrument_details(
+                pricing_symbol,
+                exchange,
+                expiry,
+                right,
+                strike,
+            )
+            if not description or tick_size is None:
+                raise ValueError(f"HTTP retry instrument details not found | symbol={pricing_symbol} | exchange={exchange} | expiry={expiry} | right={right} | strike={strike}")
+
+            cache_symbol = None
+            if right in ("CE", "PE") and strike is not None:
+                expiry_ddmmmyy = self.to_ddmmmyy(expiry)
+                cache_symbol = self.build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
+
+            new_price = self.price_from_avg_ltp_or_fallback(
+                side=side,
+                base_price=base_price,
+                tick_size=tick_size,
+                description=description,
+                cache_symbol=cache_symbol,
+                for_otm_strike=True,
+            )
+            order_info["price"] = new_price
+            return new_price
+        except Exception as e:
+            raise RuntimeError(f"HTTP retry price recalculation failed: {e}")
+
+
+    def send_stratx_order_request(self, url, headers, payload, order_info):
+        request_start_ts = time.perf_counter()
+        submitted_ts = order_info.get("submitted_ts")
+        order_queue_ms = ((request_start_ts - submitted_ts) * 1000) if submitted_ts else -1.0
+
+        try:
+            session = self.get_stratx_session()
+            current_payload = payload
+            response = None
+            response_text = ""
+            http_ms = -1.0
+
+            for attempt in range(1, StratX.stratx_http_max_attempts + 1):
+                attempt_start_ts = time.perf_counter()
+                response = session.post(
+                    url,
+                    headers=headers,
+                    data=current_payload,
+                    timeout=StratX.stratx_request_timeout
+                )
+
+                request_end_ts = time.perf_counter()
+                http_ms = (request_end_ts - attempt_start_ts) * 1000
+                response_text = response.text
+
+                if response.status_code == 200:
+                    break
+
+                printt(f"STRATX_HTTP_RETRY_RESPONSE | attempt={attempt} | max={StratX.stratx_http_max_attempts} | status={response.status_code} | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={order_info.get('price')} | description={order_info.get('description')} | http={http_ms:.1f}ms | response={response_text}")
+
+                if attempt >= StratX.stratx_http_max_attempts:
+                    break
+
+                new_price = self.recalculate_stratx_http_retry_price(order_info)
+                current_payload = self.update_stratx_payload_price(current_payload, new_price)
+
+                printt(f"STRATX_HTTP_RETRY_REPRICE | next_attempt={attempt + 1} | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={new_price} | description={order_info.get('description')}")
+
+                time.sleep(StratX.stratx_http_retry_sleep)
+
+            try:
+                response_json = response.json()
+            except Exception as json_error:
+                raise RuntimeError(f"Invalid JSON response | status={response.status_code} | body={response_text} | error={json_error}")
+
+            if response.status_code < 200 or response.status_code >= 300:
+                raise RuntimeError(f"HTTP error | status={response.status_code} | body={response_text}")
+
+            data = response_json.get("data")
+            if not data or not isinstance(data, list):
+                raise RuntimeError(f"Missing data in StratX response | status={response.status_code} | body={response_text}")
+
+            reference_id = data[0].get("reference_id")
+            if not reference_id:
+                raise RuntimeError(f"Missing reference_id in StratX response | status={response.status_code} | body={response_text}")
+
+            printt(f"STRATX_HTTP_SUCCESS | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={order_info.get('price')} | description={order_info.get('description')} | ref_id={reference_id} | order_queue={order_queue_ms:.1f}ms | http={http_ms:.1f}ms | response={response_text}")
+
+            return reference_id
+
+        except Exception as e:
+            request_end_ts = time.perf_counter()
+            http_ms = (request_end_ts - request_start_ts) * 1000
+
+            raise RuntimeError(f"StratX order request failed | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={order_info.get('price')} | order_queue={order_queue_ms:.1f}ms | http={http_ms:.1f}ms | error={e}")
+
+
+    def log_stratx_future_result(self, future):
+        try:
+            reference_id = future.result()
+            self.register_reference_root_id(future, reference_id)
+            printt(f"STRATX_FUTURE_DONE | ref_id={reference_id}")
+        except Exception as e:
+            with StratX.retry_state_lock:
+                StratX.future_root_ids.pop(future, None)
+            printt(f"STRATX_FUTURE_FAILED | {e}")
+
+    def get_orderbook_row_value(self, row, key, default=None):
+        try:
+            if isinstance(row, dict):
+                value = row.get(key, default)
+            else:
+                value = getattr(row, key, default)
+            if value is None:
+                return default
+            if isinstance(value, float) and pd.isna(value):
+                return default
+            return value
+        except Exception:
+            return default
+
+    def is_retryable_orderbook_status(self, row):
+        try:
+            status = str(self.get_orderbook_row_value(row, "status", "")).strip().upper()
+            order_message = str(self.get_orderbook_row_value(row, "order_message", "")).strip().upper()
+
+            if status == "CANCEL":
+                return True
+
+            if status == "REJECTED":
+                return "PRICE" in order_message and "LPP" in order_message
+
+            return False
+        except Exception as e:
+            printt(f"STRATX_ORDERBOOK_RETRY_STATUS_CHECK_FAILED | error={e} | row={row}")
+            return False
+
+    def get_retry_freeze_quantity(self, symbol):
+        normalized_symbol = str(symbol).strip().upper()
+        if normalized_symbol in ("NIFTY", "NIFTY 50"):
+            return niftyFreeze
+        if normalized_symbol in ("BANKNIFTY", "NIFTY BANK"):
+            return bnfFreeze
+        if normalized_symbol in ("MIDCPNIFTY", "NIFTY MID SELECT"):
+            return midcpniftyFreeze
+        if normalized_symbol in ("FINNIFTY", "NIFTY FIN SERVICE"):
+            return finniftyFreeze
+        if normalized_symbol in ("SENSEX", "BSX"):
+            return sensexFreeze
+        if normalized_symbol in ("BANKEX", "BKX"):
+            return bankex
+        return None
+
+    def get_retry_payload_symbol(self, symbol, exchange):
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_exchange = str(exchange).strip().upper()
+        if normalized_exchange == "BSEFO":
+            if normalized_symbol == "SENSEX":
+                return "BSX"
+            if normalized_symbol == "BANKEX":
+                return "BKX"
+        return normalized_symbol
+
+    def get_retry_pricing_symbol(self, symbol):
+        normalized_symbol = str(symbol).strip().upper()
+        if normalized_symbol == "BSX":
+            return "SENSEX"
+        if normalized_symbol == "BKX":
+            return "BANKEX"
+        return normalized_symbol
+
+    def get_retry_instrument_details(self, symbol, exchange, expiry, right, strike):
+        try:
+            self.load_instrument_master()
+
+            normalized_symbol = self.get_retry_pricing_symbol(symbol)
+            normalized_exchange = str(exchange).strip().upper()
+            normalized_expiry = str(expiry).strip()
+            normalized_right = str(right).strip().upper()
+            normalized_strike = None if normalized_right == "FUT" else float(strike)
+
+            cached = StratX.retry_instrument_by_key.get(
+                (normalized_exchange, normalized_symbol, normalized_expiry, normalized_right, normalized_strike)
+            )
+            if cached is not None:
+                return cached
+
+            if StratX.inst_df is None:
+                return None, None
+
+            if normalized_right == "CE":
+                option_type = "3"
+            elif normalized_right == "PE":
+                option_type = "4"
+            elif normalized_right == "FUT":
+                option_type = "1"
+            else:
+                return None, None
+
+            filtered = StratX.inst_df[
+                (StratX.inst_df["exchange_segment_normalized"] == normalized_exchange) &
+                (StratX.inst_df["name_normalized"] == normalized_symbol) &
+                (StratX.inst_df["contract_expiration_yyyymmdd"] == normalized_expiry) &
+                (StratX.inst_df["option_type_normalized"] == option_type)
+            ]
+
+            if normalized_right != "FUT":
+                filtered = filtered[StratX.inst_df.loc[filtered.index, "strike_price_numeric"] == normalized_strike]
+
+            if filtered.empty:
+                return None, None
+
+            row = filtered.iloc[0]
+            description = str(row["Description"]).strip()
+            tick_size = float(row["tick_size_numeric"])
+            StratX.retry_instrument_by_key[
+                (normalized_exchange, normalized_symbol, normalized_expiry, normalized_right, normalized_strike)
+            ] = (description, tick_size)
+            return description, tick_size
+        except Exception as e:
+            printt(f"Error in get_retry_instrument_details: {e}")
+            return None, None
+
+    def retry_single_orderbook_row(self, row, root_order_id, client_ids):
+        try:
+            url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
+            symbol = str(self.get_orderbook_row_value(row, "symbol", "")).strip().upper()
+            exchange = str(self.get_orderbook_row_value(row, "exchange", "")).strip().upper()
+            segment = str(self.get_orderbook_row_value(row, "segment", "")).strip().upper()
+            right = str(self.get_orderbook_row_value(row, "right", "")).strip().upper()
+            side = str(self.get_orderbook_row_value(row, "buyorsell", "")).strip().upper()
+            strategy_name = str(self.get_orderbook_row_value(row, "strategy_name", cre.strategy_name)).strip()
+            expiry = str(self.get_orderbook_row_value(row, "expiry", "")).strip()
+
+            if not symbol or not exchange or not segment or not right or not side or not expiry:
+                raise ValueError(f"Missing retry row fields: {row}")
+
+            quantity = int(float(self.get_orderbook_row_value(row, "quantity", 0)))
+            if quantity <= 0:
+                raise ValueError(f"Invalid retry quantity: {quantity}")
+
+            strike = self.get_orderbook_row_value(row, "strike", None)
+            if right == "FUT":
+                strike = None
+            else:
+                strike = float(strike)
+
+            base_price = float(self.get_orderbook_row_value(row, "price", self.get_orderbook_row_value(row, "initiated_price", 0)))
+            pricing_symbol = self.get_retry_pricing_symbol(symbol)
+            payload_symbol = self.get_retry_payload_symbol(symbol, exchange)
+            freez = self.get_retry_freeze_quantity(symbol)
+            if freez is None:
+                raise ValueError(f"Retry freeze quantity not found for symbol={symbol}")
+
+            description, tick_size = self.get_retry_instrument_details(
+                pricing_symbol,
+                exchange,
+                expiry,
+                right,
+                strike,
+            )
+            if not description or tick_size is None:
+                raise ValueError(f"Retry instrument details not found | symbol={pricing_symbol} exchange={exchange} expiry={expiry} right={right} strike={strike}")
+
+            cache_symbol = None
+            if right in ("CE", "PE") and strike is not None:
+                expiry_ddmmmyy = self.to_ddmmmyy(expiry)
+                cache_symbol = self.build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
+
+            price = self.price_from_avg_ltp_or_fallback(
+                side=side,
+                base_price=base_price,
+                tick_size=tick_size,
+                description=description,
+                cache_symbol=cache_symbol,
+                for_otm_strike=True,
+            )
+
+            printt(f"STRATX_ORDERBOOK_RETRY_SUBMIT | root_id={root_order_id} | clients={len(client_ids)} | sym={payload_symbol} | side={side} | qty={quantity} | price={price} | description={description} | retry_ref_source={self.get_orderbook_row_value(row, 'reference_id', '')}")
+
+            return self.place_stratx_single_order(
+                url,
+                strategy_name,
+                payload_symbol,
+                strike,
+                expiry,
+                side,
+                quantity,
+                price,
+                exchange,
+                segment,
+                right,
+                freez,
+                root_order_id=root_order_id,
+                client_ids=client_ids,
+                description=description,
+            )
+        except Exception as e:
+            printt(f"STRATX_ORDERBOOK_RETRY_SUBMIT_FAILED | root_id={root_order_id} | error={e}")
+            return []
+
+    def get_retry_group_key(self, root_order_id, reference_id, retry_no, row):
+        try:
+            strike = self.get_orderbook_row_value(row, "strike", "")
+            quantity = self.get_orderbook_row_value(row, "quantity", "")
+            return (
+                str(root_order_id),
+                str(reference_id),
+                int(retry_no),
+                str(self.get_orderbook_row_value(row, "symbol", "")).strip().upper(),
+                str(self.get_orderbook_row_value(row, "exchange", "")).strip().upper(),
+                str(self.get_orderbook_row_value(row, "segment", "")).strip().upper(),
+                str(self.get_orderbook_row_value(row, "right", "")).strip().upper(),
+                str(self.get_orderbook_row_value(row, "buyorsell", "")).strip().upper(),
+                str(self.get_orderbook_row_value(row, "strategy_name", cre.strategy_name)).strip(),
+                str(self.get_orderbook_row_value(row, "expiry", "")).strip(),
+                "" if strike is None else str(strike).strip(),
+                "" if quantity is None else str(quantity).strip(),
+            )
+        except Exception as e:
+            printt(f"STRATX_ORDERBOOK_RETRY_GROUP_KEY_FAILED | error={e} | row={row}")
+            return None
+    
+    def retry_failed_orderbook_orders(self, rows):
+        try:
+            if not rows:
+                return
+            if not StratX.retry_state_loaded:
+                self.load_retry_state()
+
+            eligible_groups = {}
+
+            for row in rows:
+                try:
+                    status = str(self.get_orderbook_row_value(row, "status", "")).strip().upper()
+                    if not self.is_retryable_orderbook_status(row):
+                        continue
+
+                    reference_id = str(self.get_orderbook_row_value(row, "reference_id", "")).strip()
+                    if not reference_id:
+                        continue
+
+                    client_id = str(self.get_orderbook_row_value(row, "client_id", "")).strip()
+                    if not client_id:
+                        continue
+
+                    with StratX.retry_state_lock:
+                        reference_map = StratX.retry_state.setdefault("reference_id_to_root_id", {})
+                        root_order_id = reference_map.get(reference_id)
+
+                        if not root_order_id:
+                            continue
+
+                        root_state = self.get_retry_root_state(root_order_id)
+                        retry_counts = root_state["retry_count_by_client"]
+                        processed_refs_by_client = root_state["processed_refs_by_client"]
+                        client_processed_refs = processed_refs_by_client.setdefault(client_id, set())
+
+                        if reference_id in client_processed_refs:
+                            continue
+
+                        retry_count = int(retry_counts.get(client_id, 0))
+                        if retry_count >= StratX.max_orderbook_retries:
+                            client_processed_refs.add(reference_id)
+                            StratX.retry_state_dirty = True
+                            continue
+
+                        retry_no = retry_count + 1
+                        client_processed_refs.add(reference_id)
+                        retry_counts[client_id] = retry_no
+                        StratX.retry_state_dirty = True
+
+                    group_key = self.get_retry_group_key(root_order_id, reference_id, retry_no, row)
+                    if group_key is None:
+                        continue
+
+                    group = eligible_groups.setdefault(
+                        group_key,
+                        {
+                            "row": row,
+                            "root_order_id": root_order_id,
+                            "client_ids": [],
+                            "client_id_set": set(),
+                        },
+                    )
+                    if client_id not in group["client_id_set"]:
+                        group["client_ids"].append(client_id)
+                        group["client_id_set"].add(client_id)
+
+                except Exception as row_error:
+                    printt(f"STRATX_ORDERBOOK_RETRY_ROW_ERROR | ref_id={self.get_orderbook_row_value(row, 'reference_id', '')} | client_id={self.get_orderbook_row_value(row, 'client_id', '')} | error={row_error}")
+
+            for group in eligible_groups.values():
+                try:
+                    client_ids = group["client_ids"]
+                    if not client_ids:
+                        continue
+                    self.retry_single_orderbook_row(
+                        group["row"],
+                        group["root_order_id"],
+                        client_ids,
+                    )
+                except Exception as group_error:
+                    printt(f"STRATX_ORDERBOOK_RETRY_GROUP_SUBMIT_ERROR | root_id={group.get('root_order_id')} | clients={len(group.get('client_ids', []))} | error={group_error}")
+
+        except Exception as e:
+            printt(f"Error in retry_failed_orderbook_orders: {e}")
+
+
+    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez, csv_read_ts=None, timing_ctx=None, root_order_id=None, client_ids=None, description=None):
+        try:
+            single_order_entry_ts = time.perf_counter()
+            if timing_ctx is not None:
+                timing_ctx["single_order_enter_ts"] = single_order_entry_ts
+
+            payload_client_ids = [] if client_ids is None else list(client_ids)
+
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
                 "orders": [
                     {
-                        "client_ids": [],
+                        "client_ids": payload_client_ids,
                         "strategy_name": strategy_name,
                         "symbol": symbol,
                         "strike": strike,
@@ -769,11 +1634,11 @@ class StratX:
                         "amoorder": "N",
                         "disclosedquantity": 0,
                         "triggerprice": 0,
-                        # "lmt_price_inc": 1,
-                        # "lmt_price_inc_type": "PTS",
-                        # "lmt_price_attempt": 3,
-                        # "lmt_price_atmp_sleep": 1000,
-                        # "lmt_price_alternative": "CANCEL",
+                        "lmt_price_inc": 0,
+                        "lmt_price_inc_type": "PTS",
+                        "lmt_price_attempt": 0,
+                        "lmt_price_atmp_sleep": 1000,
+                        "lmt_price_alternative": "CANCEL",
                         "sectype": "IND",
                         "right": right,
                         "trigger": "Entry",
@@ -784,17 +1649,80 @@ class StratX:
             })
 
             headers = {'Content-Type': 'application/json'}
-            response = requests.request("POST", url, headers=headers, data=payload)
-            printt(f"{exchange} Order Response: {response.text}")
-            r = response.json()
-            return [r['data'][0]['reference_id']]
+
+            submitted_ts = time.perf_counter()
+
+            if root_order_id is None:
+                root_order_id = str(uuid.uuid4())
+
+            order_info = {
+                "client_ids": payload_client_ids,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "exchange": exchange,
+                "segment": segment,
+                "strategy_name": strategy_name,
+                "strike": strike,
+                "expiry": expiry,
+                "right": right,
+                "description": description,
+                "submitted_ts": submitted_ts,
+                "root_order_id": root_order_id,
+            }
+
+            future = StratX.stratx_order_pool.submit(
+                self.send_stratx_order_request,
+                url,
+                headers,
+                payload,
+                order_info,
+            )
+
+            self.register_future_root_id(future, root_order_id)
+            future.add_done_callback(self.log_stratx_future_result)
+
+            if csv_read_ts is not None:
+                after_submit_ms = (time.perf_counter() - csv_read_ts) * 1000
+                ctx = timing_ctx or {}
+
+                worker_dequeue_ts = ctx.get("worker_dequeue_ts")
+                broker_entry_ts = ctx.get("broker_entry_ts")
+                single_order_enter_ts = ctx.get("single_order_enter_ts")
+
+                queue_ms = (worker_dequeue_ts - csv_read_ts) * 1000 if worker_dequeue_ts else -1.0
+                price_ms = ctx.get("price_calc_ms", -1.0)
+                e2e_ms = after_submit_ms
+
+                broker_total_ms = (
+                    (single_order_enter_ts - broker_entry_ts) * 1000
+                    if broker_entry_ts and single_order_enter_ts
+                    else -1.0
+                )
+
+                broker_prep_ms = broker_total_ms
+                if price_ms > 0:
+                    broker_prep_ms -= price_ms
+
+                if broker_prep_ms < 0:
+                    broker_prep_ms = 0.0
+
+                printt(f"ORDER_SUBMIT_TIMING | sym={symbol} | side={side} | qty={quantity} | price={price} | total={e2e_ms:.1f}ms | queue={queue_ms:.1f}ms | broker_prep={broker_prep_ms:.1f}ms | price_calc={price_ms:.1f}ms")
+            else:
+                printt(f"ORDER_SUBMIT_TIMING | sym={symbol} | side={side} | qty={quantity} | price={price} | total=-1.0ms | queue=-1.0ms | broker_prep=-1.0ms | price_calc=-1.0ms")
+
+            return [future]
+
         except Exception as e:
-            printt(f"Error placing {exchange} order: {e}")
+            printt(f"Error submitting {exchange} order future: {e}")
             return []
 
 
-    def placeOrderStratX_NSE(self, name, side, trade, strategy_name=cre.strategy_name):
+    def placeOrderStratX_NSE(self, name, side, trade, csv_read_ts=None, timing_ctx=None, strategy_name=getattr(cre, "strategy_name", None)):
         try:
+            if timing_ctx is not None:
+                timing_ctx["broker_entry_ts"] = time.perf_counter()
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
             global niftyFreeze
@@ -812,29 +1740,39 @@ class StratX:
                 freez = finniftyFreeze
 
             price = float(trade[15])
-            self.load_instrument_master()
-            row = StratX.inst_df.loc[StratX.inst_df["Name"].str.upper() == name.upper(),"TickSize"]
-            if row.empty:
-                raise ValueError(f"Tick size not found for {name}")
-            tick_size = float(row.iat[0])
+            if StratX.inst_df is None:
+                self.load_instrument_master()
+            normalized_name = str(name).strip().upper()
+            tick_size = StratX.tick_size_by_name.get(normalized_name)
+            if tick_size is None:
+                row = StratX.inst_df.loc[
+                    StratX.inst_df["name_normalized"] == normalized_name,
+                    "tick_size_numeric"
+                ]
+                if row.empty:
+                    raise ValueError(f"Tick size not found for {name}")
+                tick_size = float(row.iat[0])
 
             description = str(trade[7]).strip()
             inst_type = str(trade[2]).strip().upper()
 
             cache_symbol = None
             if not inst_type.startswith("FUT"):
-                expiry = pd.to_datetime(trade[4]).strftime("%d%b%y").upper()
+                expiry = self.to_ddmmmyy(trade[4])
                 right_tmp = str(trade[6]).strip().upper()
                 strike_tmp = float(trade[5])
                 cache_symbol = self.build_cache_symbol(name, expiry, strike_tmp, right_tmp)
 
+            _t0 = time.perf_counter()
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 base_price=price,
                 tick_size=tick_size,
                 description=description,
-                cache_symbol=cache_symbol
+                cache_symbol=cache_symbol,
             )
+            if timing_ctx is not None:
+                timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _t0) * 1000)
             # price = 0
 
             inst_type = str(trade[2]).strip().upper()
@@ -856,29 +1794,32 @@ class StratX:
             if strategy_key == "VOLATILITY CORE" and right in ("CE", "PE") and strike is not None:
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry_yyyymmdd, side, qty, price,
-                    "NSEFO", segment, right, freez
+                    "NSEFO", segment, right, freez, csv_read_ts, timing_ctx, description=description
                 ))
 
                 otm_strike = self.get_otm_strike(name, right, strike, offset=2)
                 if otm_strike is None:
                     printt(f"VOLATILITYCORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
                 else:
-                    expiry_ddmmmyy = pd.to_datetime(trade[4]).strftime("%d%b%y").upper()
+                    expiry_ddmmmyy = self.to_ddmmmyy(trade[4])
                     otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
                     otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
                     if not otm_description:
                         raise ValueError(f"VOLATILITYCORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
+                    _otm_price_t0 = time.perf_counter()
                     otm_price = self.price_from_avg_ltp_or_fallback(
                         side=side,
                         base_price=None,
                         tick_size=tick_size,
                         description=otm_description,
                         cache_symbol=otm_cache_symbol,
-                        for_otm_strike=True
+                        for_otm_strike=True,
                     )
+                    if timing_ctx is not None:
+                        timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
                     iids.extend(self.place_stratx_single_order(
                         url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
-                        "NSEFO", "NFO-OPT", right, freez
+                        "NSEFO", "NFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
                     ))
 
             elif strategy_key == "IMPULSE CORE" and right in ("CE", "PE") and strike is not None:
@@ -886,28 +1827,31 @@ class StratX:
                 if otm_strike is None:
                     raise ValueError(f"IMPULSECORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
 
-                expiry_ddmmmyy = pd.to_datetime(trade[4]).strftime("%d%b%y").upper()
+                expiry_ddmmmyy = self.to_ddmmmyy(trade[4])
                 otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
                 otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
                 if not otm_description:
                     raise ValueError(f"IMPULSECORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
+                _otm_price_t0 = time.perf_counter()
                 otm_price = self.price_from_avg_ltp_or_fallback(
                     side=side,
                     base_price=None,
                     tick_size=tick_size,
                     description=otm_description,
                     cache_symbol=otm_cache_symbol,
-                    for_otm_strike=True
+                    for_otm_strike=True,
                 )
+                if timing_ctx is not None:
+                    timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
-                    "NSEFO", "NFO-OPT", right, freez
+                    "NSEFO", "NFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
                 ))
 
             else:
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry_yyyymmdd, side, qty, price,
-                    "NSEFO", segment, right, freez
+                    "NSEFO", segment, right, freez, csv_read_ts, timing_ctx, description=description
                 ))
 
             return iids
@@ -917,8 +1861,10 @@ class StratX:
             return []
 
 
-    def placeOrderStratX_BSE(self, name, side, trade, strategy_name=cre.strategy_name):
+    def placeOrderStratX_BSE(self, name, side, trade, csv_read_ts=None, timing_ctx=None, strategy_name=getattr(cre, "strategy_name", None)):
         try:
+            if timing_ctx is not None:
+                timing_ctx["broker_entry_ts"] = time.perf_counter()
             global sensexFreeze
             global bankex
 
@@ -933,7 +1879,7 @@ class StratX:
 
             if not symbol:
                 return []
-            
+
             if symbol == 'BANKEX':
                 freez = bankex
                 name = 'BKX'
@@ -947,16 +1893,19 @@ class StratX:
 
             cache_symbol = None
             if right in ("CE", "PE"):
-                expiry_ddmmmyy = pd.to_datetime(expiry, format="%Y%m%d").strftime("%d%b%y").upper()
+                expiry_ddmmmyy = self.to_ddmmmyy(expiry)
                 cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, strike, right)
 
+            _t0 = time.perf_counter()
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 base_price=price,
                 tick_size=tick_size,
                 description=description,
-                cache_symbol=cache_symbol
+                cache_symbol=cache_symbol,
             )
+            if timing_ctx is not None:
+                timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _t0) * 1000)
             # price = 0
 
             iids = []
@@ -973,29 +1922,32 @@ class StratX:
             if strategy_key == "VOLATILITY CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry, side, qty, price,
-                    "BSEFO", segment, right, freez
+                    "BSEFO", segment, right, freez, csv_read_ts, timing_ctx, description=description
                 ))
 
                 otm_strike = self.get_otm_strike(symbol, right, strike, offset=2)
                 if otm_strike is None:
                     printt(f"VOLATILITYCORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
                 else:
-                    expiry_ddmmmyy = pd.to_datetime(expiry, format="%Y%m%d").strftime("%d%b%y").upper()
+                    expiry_ddmmmyy = self.to_ddmmmyy(expiry)
                     otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
                     otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
                     if not otm_description:
                         raise ValueError(f"VOLATILITYCORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
+                    _otm_price_t0 = time.perf_counter()
                     otm_price = self.price_from_avg_ltp_or_fallback(
                         side=side,
                         base_price=None,
                         tick_size=tick_size,
                         description=otm_description,
                         cache_symbol=otm_cache_symbol,
-                        for_otm_strike=True
+                        for_otm_strike=True,
                     )
+                    if timing_ctx is not None:
+                        timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
                     iids.extend(self.place_stratx_single_order(
                         url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
-                        "BSEFO", "BFO-OPT", right, freez
+                        "BSEFO", "BFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
                     ))
 
             elif strategy_key == "IMPULSE CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
@@ -1003,28 +1955,31 @@ class StratX:
                 if otm_strike is None:
                     raise ValueError(f"IMPULSECORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
 
-                expiry_ddmmmyy = pd.to_datetime(expiry, format="%Y%m%d").strftime("%d%b%y").upper()
+                expiry_ddmmmyy = self.to_ddmmmyy(expiry)
                 otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
                 otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
                 if not otm_description:
                     raise ValueError(f"IMPULSECORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
+                _otm_price_t0 = time.perf_counter()
                 otm_price = self.price_from_avg_ltp_or_fallback(
                     side=side,
                     base_price=None,
                     tick_size=tick_size,
                     description=otm_description,
                     cache_symbol=otm_cache_symbol,
-                    for_otm_strike=True
+                    for_otm_strike=True,
                 )
+                if timing_ctx is not None:
+                    timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
-                    "BSEFO", "BFO-OPT", right, freez
+                    "BSEFO", "BFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
                 ))
 
             else:
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry, side, qty, price,
-                    "BSEFO", segment, right, freez
+                    "BSEFO", segment, right, freez, csv_read_ts, timing_ctx, description=description
                 ))
 
             return iids
@@ -1060,22 +2015,42 @@ class StratX:
 
     def getOrderBookALL(self):
         try:
-            url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size=1000000"
+            page_size = 5000
+            page_number = 1
+            max_pages = 100
+            all_data = []
+
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
+                "status": ["REJECTED", "CANCEL", "ERROR"]
                 })
             headers = {
             'Content-Type': 'application/json'
             }
 
-            for i in range(10):
-                try:
-                    response = requests.request("POST", url, headers=headers, data=payload)
-                    return response.json()
-                except Exception as e:
-                    printt(f"StratX orderbook retry {i}: {e}")
-                    time.sleep(1)
+            while page_number <= max_pages:
+                url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size={page_size}&page_number={page_number}"
+                response = requests.request("POST", url, headers=headers, data=payload)
+                page_response = response.json()
+
+                if not isinstance(page_response, dict):
+                    return page_response
+
+                page_data = page_response.get("data")
+                if not isinstance(page_data, list):
+                    return page_response
+
+                all_data.extend(page_data)
+
+                if len(page_data) != page_size:
+                    page_response["data"] = all_data
+                    return page_response
+
+                page_number += 1
+
+            page_response["data"] = all_data
+            return page_response
 
         except Exception as e:
             printt(f"Error in StratX getOrderBookALL: {e}")

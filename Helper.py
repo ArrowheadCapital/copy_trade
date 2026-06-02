@@ -11,6 +11,8 @@ import concurrent.futures
 import threading
 import os
 from datetime import timedelta
+from async_logger import createLogFile as async_create_log_file
+from async_logger import printt as async_printt
 
 importlib.reload(cre)
 lock = threading.Lock()
@@ -491,22 +493,10 @@ def msgsten(msg,*args):
         printt('Error in sending telegram msg s10',e)
 
 def printt(*args, **kwargs):
-    timestamp = datetime.datetime.now().strftime("[%H:%M:%S] :")
-    print(timestamp, *args, **kwargs)
-    saveInLogFile(*args, **kwargs)
+    async_printt(*args, **kwargs)
 
 def saveInLogFile(*args, **kwargs):
-    try:
-        timestamp = datetime.datetime.now().strftime("[%H:%M:%S] :")
-        today = datetime.datetime.now().strftime("%d_%m_%y")
-        file_path = f'logs/{today}.txt'
-        args_str = ' '.join(map(str, args))
-        kwargs_str = ' '.join(f'{k}={v}' for k, v in kwargs.items())
-        content = f'{timestamp} {args_str} {kwargs_str}'
-        with open(file_path, 'a') as file:
-            file.write(content + '\n')
-    except Exception as e:
-        pass
+    async_printt(*args, **kwargs)
 
 def read_file_to_string(filename):
     with open(filename, 'r') as file:
@@ -688,23 +678,7 @@ def getOpenSymPaper():
     return(openSymbol)
 
 def createLogFile():
-    today = datetime.datetime.now().strftime("%d_%m_%y")
-    directory = 'logs'
-    filename = f'{today}.txt'
-    # Ensure the directory exists
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    
-    # Full path to the file
-    filepath = os.path.join(directory, filename)
-    
-    if not os.path.isfile(filepath):
-        # Create a blank file
-        with open(filepath, 'w') as file:
-            pass
-        printt(f"Created blank file: {filepath}")
-    else:
-        printt(f"File already exists: {filepath}")
+    async_create_log_file()
 
 def createTradebook():
     folder_name = 'Trades'
