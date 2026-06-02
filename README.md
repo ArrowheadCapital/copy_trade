@@ -1,376 +1,1323 @@
-# Copy Trade System Documentation
+# Copy Trade
 
-This document explains how the Copy Trade system works.
+Copy Trade is a Python trade-copying engine. It watches live NSE and BSE trade files, detects new rows, combines related rows, validates each trade, and sends the order to the selected broker.
 
-The core files are:
+The project currently supports two broker paths:
 
-- `zFinalMulti.py` (main engine and workflow)
-- `helperGS.py` (broker API adapters)
-- `credentials.py` (configurations)
+- `GREEK`: Greeksoft API order placement.
+- `STRATX`: StratX API order placement, pricing, circuit clamping, orderbook polling, and client-aware failed-order retry.
 
-`zzEXE.py` is only a GUI wrapper to start `zFinalMulti.py`. As we start `zzEXE.py`, a window opens with a 'Start Algo' button. And as we click it, it calls `zFinalMulti.py` and our copy tade system starts running.
+This README explains the complete project flow and the important functions in the codebase.
 
----
+## Files
 
-## 1) High‑Level Purpose
+| File                    | Purpose                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `zFinalMulti.py`      | Main runtime. Reads CSV files, starts workers, queues trades, polls orderbook, and dispatches broker orders.              |
+| `helperGS.py`         | Broker layer. Contains Greeksoft and StratX implementations plus shared helpers.                                          |
+| `credentials.py`      | Runtime configuration: broker choice, CSV paths, freeze quantities, API credentials, strategy name, instrument file path. |
+| `file_watcher.py`     | Watchdog-based file watcher that triggers CSV processing immediately when input files change.                             |
+| `async_logger.py`     | Non-blocking logger used by `printt()` and daily log files.                                                             |
+| `fetch_circuit.py`    | Redis helpers for circuit limits and LTP/average data used by StratX pricing.                                             |
+| `fetch_order_book.py` | Standalone utility to download StratX orderbook rows into the `Trades/` folder.                                         |
+| `zzEXE.py`            | Tkinter GUI wrapper with a Start Algo button. Runs `zFinalMulti.py`.                                                    |
+| `run.cmd`             | Windows launcher that activates the virtual environment and starts `zzEXE.py`.                                          |
+| `Helper.py`           | Legacy/general helper module used by the runtime for logging and time wait helpers.                                       |
+| `heading.py`          | Small GUI heading text source used by `zzEXE.py`.                                                                       |
+| `state.json`          | StratX retry state file created/updated at runtime.                                                                       |
+| `trades.csv`          | Latest orderbook snapshot written by the orderbook polling thread.                                                        |
 
-The system watches two CSV files (NSE and BSE trade files "{mmdd}AUTOTRD.txt") and copies new trades to a selected broker. It supports two brokers:
+## Runtime Overview
 
-- `GREEK` (Greeksoft API)
-- `STRATX` (StratX API for Motilal)
+The normal live entry point is:
 
-When a new trade row appears in the input CSV, the system validates it, checks basic rules, and then places an order with the selected broker. It uses multiple worker threads for speed and also tracks order latency.
+```bat
+run.cmd
+```
 
----
+`run.cmd` activates `.venv` or `venv`, then starts:
 
-## 2) File Roles
+```text
+zzEXE.py
+```
 
-### `zFinalMulti.py`
+The GUI opens and the Start Algo button runs:
 
-This is the main runtime script:
+```text
+zFinalMulti.py
+```
 
-- Sets up logging and timing checks.
-- Chooses the broker based on `credentials.py`.
-- Starts background threads:
-  - Order book polling thread (writes `trades.csv`).
-  - Worker threads for NSE and BSE queues.
-  - Latency monitor thread.
-- Continuously reads the NSE/BSE trade files and pushes new rows into the queues.
+The main flow is:
 
-### `helperGS.py`
+```text
+NSE/BSE trade CSV changes
+  -> process_nse_csv() / process_bse_csv()
+  -> combine rows by exchange order id
+  -> enqueue combined row
+  -> NSE/BSE worker validates row
+  -> selected broker places order
+  -> orderbook thread polls broker orderbook
+  -> trades.csv is refreshed
+  -> StratX retry processor handles retryable failed rows
+```
 
-This is the broker interface layer. It contains:
+## Configuration
 
-- Common utility functions: logging, log file creation, freeze quantity splitting.
-- `greeksoft` class: handles authentication, instrument master, and order placement for Greeksoft.
-- `StratX` class: handles instrument lookup, StratX order placement and order status.
+All runtime configuration lives in `credentials.py`.
 
-`zFinalMulti.py` uses these classes to place orders according to broker.
+The most important settings are:
 
-### `credentials.py`
+| Setting                                                                                    | Meaning                                                                                 |
+| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `broker`                                                                                 | Selects `"STRATX"` or `"GREEK"`.                                                    |
+| `pathNSE` / `pathBSE`                                                                  | Daily source trade-file templates. They must contain `{formatted_date}`.              |
+| `multiplier`                                                                             | Multiplies copied order quantity. Default is `1`.                                     |
+| `niftyFreeze`, `bnfFreeze`, `sensexFreeze`, `bankex`, `midcpnifty`, `finnifty` | Freeze quantity limits used while placing/splitting orders.                             |
+| `optionInstrumentPath`                                                                   | StratX instrument CSV path, loaded from `OPTION_INSTRUMENT_CSV` in `.env`.          |
+| `strategy_name`                                                                          | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value. |
 
-Stores configuration and secret keys:
+### Input Files
 
-- Broker selection (`broker`)
-- File paths for NSE/BSE input files
-- API credentials for StratX or Greeksoft
-- Freeze quantity limits
-- `multiplier` (applies to quantity)
-- StratX instrument master path from `OPTION_INSTRUMENT_CSV`
+```python
+pathNSE = 'C:/AutoOnlineBackup/NSE/FO/{formatted_date}AUTOTRD.txt'
+pathBSE = 'C:/AutoOnlineBackup/BSE/FO/{formatted_date}AUTOTRD.txt'
+```
 
-To change any environment settings, this is the file that needs to be edited.
+`zFinalMulti.py` fills `{formatted_date}` with:
 
----
+```python
+datetime.datetime.today().strftime("%m%d")
+```
 
-## 3) Main Flow in `zFinalMulti.py`
+For example, on June 2 the file name date part is `0602`.
 
-### 3.1 Startup and Validation
+NSE files are comma-separated. BSE files are pipe-separated.
 
-1. Logging is initialized (`logs/<dd_mm_yy>.txt`) and config variables are set.
-2. Broker is read from `credentials.py` as `BROKER`.
-3. If broker is `STRATX`, a safety check ensures:
-   - The current time is after 8:50 AM because the `options_instrument.csv` is updated every day around 8:45 AM.
-   - `optionInstrumentPath` exists (instrument master required for StratX).
-4. Broker object is created:
-   - `HG.greeksoft()` for Greeksoft. In Greeksoft, it initialises, login and get instruments data.
-   - `HG.StratX()` for StratX.
-5. NSE and BSE file paths are built using today’s date and the `pathNSE`/`pathBSE` templates.
+### Broker Selection
 
-### 3.2 Threads and Queues
+```python
+broker = "STRATX"  # "STRATX" or "GREEK"
+```
 
-The system uses two queues:
+This decides which class in `helperGS.py` is used:
 
-- `NSE_QUEUE`
-- `BSE_QUEUE`
+```python
+HG.StratX()
+HG.greeksoft()
+```
 
-And three main thread groups:
+### Quantity Controls
 
-1. **Order book thread**
-   - Calls `brokerObj.getOrderBookALL()` in a loop.
-   - Writes the response to `trades.csv`.
-   - This file is used later to query order status.
-2. **Worker threads**
-   - `MAX_WORKERS` threads for NSE and `MAX_WORKERS` for BSE.
-   - Each worker pulls a row from its queue and attempts to place the order.
-3. **Latency monitor**
-   - Every 5 minutes prints average/min/max latency of recent order placements.
+Freeze quantities are configured per symbol:
 
-### 3.3 Reading Input CSVs
+```python
+niftyFreeze = 1800
+bnfFreeze = 600
+sensexFreeze = 1000
+bankex = 900
+midcpnifty = 2800
+finnifty = 1800
+```
 
-The main loop continuously checks both input files:
+The quantity multiplier is:
 
-- It uses file modification time (`mtime`) to detect changes, only reads the file if `mtime `is updated.
-- It reads the full CSV and then only processes rows after the last seen index.
-- Each new row is pushed into the appropriate queue.
-- Uses `read_csv_safely()` to tolerate partially written files.
-- Tracks `nse_seen` and `bse_seen` to prevent double-processing.
+```python
+multiplier = 1
+```
 
-### 3.4 Trade Validation and Risk Checks
+Both broker paths multiply copied quantity by `multiplier`.
 
-Before placing an order, each worker does:
+### StratX Credentials
 
-1. **Basic validation**
-   - Symbol not empty
-   - Quantity > 0
-   - Strike > 0 (for options)
-2. **Symbol whitelist**
-   - Only index symbols in `ALLOWED_SYMBOLS` are allowed for NSE.
-3. **Market hours check**
-   - Only trades during 9:15 AM to 3:30 PM are executed.
-4. **Order rate limit**
-   - Max 10 orders per second across the whole system.
+The active StratX credentials in `credentials.py` should be filled like this:
 
-There are also commented risk checks for:
+```python
+id = "DUMMYUSER"
+secret_key = "SECRETKEY@123"
+stratX_url = "uatapi.stratx.in"  # or api.stratx.in for production
+strategy_name = "Dummy Strategy"
+```
 
-- Position limits
-- Daily loss circuit breaker
+Earlier we also used `client_id`, but the current StratX order payload uses `client_ids` inside each order. For a normal broadcast order the code sends:
 
-They have been kept for future use and not tested yet.
+```python
+"client_ids": []
+```
 
-### 3.5 Order Placement and Retry Logic
+For retry orders, it sends only the failed clients found in the StratX orderbook.
 
-Orders are placed using `execute_with_retry()`:
+### Greeksoft Credentials
 
-- It attempts the order up to 3 times.
-- After each placement it checks order status.
-- If broker returns self-trade error code `17080`:
-  - It adjusts the quantity and retries.
-  - For Greeksoft, it uses lot size to correct pending quantities.
+Greeksoft needs these values in `credentials.py`:
 
-### 3.6 Latency Tracking
+```python
+urll = "11.111.11.114:3333"
+username = "TS111"
+pw = "PASSWORD123"
+authurl = "http://greekapi.greeksoft.in:3001"
+iprocli = "1"
+AccountNumber = "C12345"
+```
 
-Each successful order placement records elapsed time in `latency_records`.
-Every 5 minutes, the system prints a summary:
+`iprocli` values:
 
-- Average latency
-- Min latency
-- Max latency
+| Value   | Meaning                 |
+| ------- | ----------------------- |
+| `"0"` | Retailer                |
+| `"1"` | Dealer through retailer |
+| `"2"` | Dealer                  |
 
----
+`AccountNumber` is mandatory for dealer-through-retailer orders. For normal retailer flow it should be empty.
 
-## 4) Broker Implementations in `helperGS.py`
+### StratX Instrument Master
 
-### 4.1 Common Helpers
+StratX needs an instrument CSV path:
 
-These are used by both brokers:
+```python
+optionInstrumentPath = os.getenv("OPTION_INSTRUMENT_CSV")
+```
 
-- `printt()` and `saveInLogFile()` for logging.
-- `createLogFile()` to ensure daily log file exists.
-- `getFreezeQua()` splits a large quantity into smaller chunks based on the exchange freeze limit.
+Set this in `.env`:
 
-### 4.2 Greeksoft (`greeksoft` class)
+```env
+OPTION_INSTRUMENT_CSV=C:/path/to/options_instruments.csv
+```
 
-This class wraps the Greeksoft REST API. It is responsible for authenticating, loading instruments, and placing orders with proper freeze‑quantity handling. The main steps are:
+`zFinalMulti.py` refuses to start StratX before 8:50 AM, because the daily instrument file is expected to be updated before live trading starts.
 
-1. **Session token creation**
-   - POST request to `authurl` to generate session token. Done only once when object is initialised.
-2. **Login**
-   - Login using session token and fetches `gcid`. (This also done on initialisation only)
-3. **Instrument master download**
-   - Reads a full contract list into `self.df`. (Only on initialisation)
-   - This data is later used to map symbols, expiry, strike, and option type into a tradable contract.
-4. **Order placement**
-   - NSE: `placeOrder()`
-   - BSE: `placeOrderBSE()`
-   - Quantity is split by exchange freeze limits using `getFreezeQua()`.
-   - Each split lot is sent as a separate order.
-5. **Order status**
-   - Reads `trades.csv` and matches `gorderid`.
-6. **Order book**
-   - `getOrderBookALL()` pulls order book updates.
+The code uses the instrument master to resolve symbol, expiry, strike, right, and tick size. Its also used to get descriptions or instrument
 
-#### Greeksoft NSE order (`placeOrder`)
+## Input CSV Formats
 
-- Input values: Greek token, side, symbol, lot size, quantity, and instrument details (`dt`).
-- The symbol decides the freeze limit (`NIFTY`, `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`).
-- The request uses exchange `"NSE"`, order type `"2"` (market order), and product `"0"` (DELIVERY).
-- Quantity is split based on freeze limits, then orders are sent in parts.
+The system reads two daily trade files:
 
-#### Greeksoft BSE order (`placeOrderBSE`)
+- NSE: `pathNSE`, comma-separated.
+- BSE: `pathBSE`, pipe-separated.
 
-- Similar to NSE but for BSE contracts.
-- Uses exchange `"BSE"` and separate freeze limits (`SENSEX`, `BANKEX`).
-- Side is mapped to `1` for Buy and `2` for Sell.
+Only specific column indexes are used by the runtime. If the upstream file format changes, these indexes must be updated in `zFinalMulti.py` and/or `helperGS.py`.
 
-**Important:**
+### NSE Columns Used
 
-For both NSE and BSE place order, check below for iprocli and account number in credentials.py
+| Column    | Meaning                                                                |
+| --------- | ---------------------------------------------------------------------- |
+| `t[2]`  | Instrument type, for example `OPTIDX` or `FUTIDX`.                 |
+| `t[3]`  | Symbol.                                                                |
+| `t[4]`  | Expiry string, for example `14FEB2026`.                              |
+| `t[5]`  | Strike, for options.                                                   |
+| `t[6]`  | Option type,`CE` or `PE`.                                          |
+| `t[7]`  | Description, used by StratX for circuit/instrument lookup.             |
+| `t[13]` | Side.`1` means BUY; anything else is treated as SELL.                |
+| `t[14]` | Quantity.                                                              |
+| `t[15]` | Source price.                                                          |
+| `t[17]` | Client code. Filtering by this is present in comments, but not active. |
+| `t[23]` | Exchange order id used by combine logic.                               |
 
-iprocli:"0" (for retailer)
+### BSE Columns Used
 
-iprocli:"1" (for dealer through retailer)
+| Column    | Meaning                                                                |
+| --------- | ---------------------------------------------------------------------- |
+| `t[4]`  | Exchange instrument id.                                                |
+| `t[5]`  | Description.                                                           |
+| `t[6]`  | Side flag,`B` or `S`.                                              |
+| `t[7]`  | Quantity.                                                              |
+| `t[8]`  | Source price.                                                          |
+| `t[9]`  | Client code. Filtering by this is present in comments, but not active. |
+| `t[16]` | Exchange order id used by combine logic.                               |
 
-iprocli:"2" (for dealer)
+## Main Runtime: `zFinalMulti.py`
 
-account number (AccountNumber="DUMMY1") is mandaotory for dealer thorugh retailer orders only, else account number should be "" (empty).
+`zFinalMulti.py` coordinates the whole system.
 
-### 4.3 StratX (`StratX` class)
+### Startup
 
-This class wraps the StratX REST API. It focuses on building the exact JSON payload required by StratX, mapping contract details, and splitting quantity by freeze limits. The main steps are:
+At startup it:
 
-1. **Load instrument master**
-   - Reads `OPTION_INSTRUMENT_CSV` (required for BSE).
-   - BSE trades depend on instrument lookup to resolve symbol, expiry, strike, and option type.
-2. **Order placement**
-   - NSE: `placeOrderStratX_NSE()`
-   - BSE: `placeOrderStratX_BSE()`
-3. **Order status**
-   - Reads `trades.csv` and matches `reference_id`.
-4. **Order book**
-   - `getOrderBookALL()` polls StratX reports API to get order book.
+1. Reloads `Helper`, `helperGS`, and `credentials`.
+2. Creates the daily log file.
+3. Reads `BROKER` from `credentials.py`.
+4. Performs StratX-specific instrument file checks.
+5. Creates the broker object.
+6. Builds today's NSE/BSE CSV paths.
+7. Starts the orderbook thread.
+8. Preloads StratX instrument data and retry state if broker is StratX.
+9. Starts NSE/BSE worker pools.
+10. Starts the file watcher and fallback poll loop.
 
-#### StratX NSE order (`placeOrderStratX_NSE`)
+### `read_csv_safely(path, sep=',', max_retries=3)`
 
-- **Exchange** must be `NSEFO`.
-- **Segment** must be:
-  - `NFO-OPT` for options
-  - `NFO-FUT` for futures
-- **Product type** must be `DELIVERY`.
-- **Right**:
-  - `CE` or `PE` for options
-  - `FUT` for futures
-- **Expiry** is converted to `YYYYMMDD`.
-- **Quantity** uses `trade[14] * multiplier`.
-- **Price** comes from `trade[15]`.
-- **Quantity split** uses freeze limit for the symbol.
+Reads a CSV file defensively. It handles:
 
-#### StratX BSE order (`placeOrderStratX_BSE`)
+- empty files,
+- partially written files,
+- parse problems while another process is writing the file.
 
-- **Exchange** must be `BSEFO`.
-- **Segment** must be:
-  - `BFO-OPT` for options
-  - `BFO-FUT` for futures
-- **Product type** must be `DELIVERY`.
-- For **SENSEX**, the symbol sent must be `BSX`.
-- For **BANKEX**, the symbol sent must be `BSX`.
-- **Right**:
-  - `CE` or `PE` for options
-  - `FUT` for futures
-- **Expiry**, **strike**, and **right** are resolved from the instrument master using `ExchangeInstrumentID` and `Description`.
-- **Quantity** uses `trade[7] * multiplier`.
-- **Price** comes from `trade[8]`.
-- **Quantity split** uses the freeze limit for the underlying index.
+It retries briefly before logging a failure.
 
----
+### `validate_trade(symbol, qty, strike=None, max_qty=50000)`
 
-## 5) Input CSV Formats
+Performs basic validation before an order is sent:
 
-The system reads from two daily files:
+- symbol must not be empty,
+- quantity must be positive,
+- strike must be positive for option rows.
 
-- NSE: `pathNSE` (comma-separated)
-- BSE: `pathBSE` (pipe-separated)
+### `is_market_open()`
 
-Only specific column indexes are used:
+Workers only place orders between:
 
-### NSE columns used
+```text
+09:15 to 15:30
+```
 
-- `t[2]`: Instrument type (`OPTIDX`, `FUTIDX `)
-- `t[3]`: Symbol
-- `t[4]`: Expiry (string like `14FEB2026`)
-- `t[5]`: Strike (for options)
-- `t[6]`: Option type (`CE` / `PE`)
-- `t[13]`: Side (1 = BUY, else SELL)
-- `t[14]`: Quantity
-- `t[15]`: Price
-- `t[17]`: Client code (commented filter in code)
+Outside market hours, workers sleep and do not consume queue rows.
 
-### BSE columns used
+### `is_symbol_allowed(symbol)`
 
-- `t[4]`: Exchange instrument id
-- `t[5]`: Description
-- `t[6]`: Side flag (`B` or `S`)
-- `t[7]`: Quantity
-- `t[8]`: Price
-- `t[9]`: Client code (commented filter in code)
+Checks the symbol against:
 
-If the CSV format changes, these indexes must be updated.
+```python
+ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
+```
 
----
+Currently this whitelist is active in the NSE worker. The BSE symbol whitelist is present but commented.
 
-## 6) Options vs Futures Differences
+### `fetch_order_book()`
 
-### NSE
+Runs forever in a daemon thread.
 
-- **Options**
-  - `right` is `CE` or `PE`.
-  - `segment` is `NFO-OPT`.
-  - `strike` is required.
-- **Futures**
-  - `right` is `FUT`.
-  - `segment` is `NFO-FUT`.
-  - `strike` is not used.
+It calls:
 
-### BSE
+```python
+brokerObj.getOrderBookALL()
+```
 
-- **Options**
-  - `right` is `CE` or `PE`.
-  - `segment` is `BFO-OPT`.
-  - `strike` is required.
-- **Futures**
-  - `right` is `FUT`.
-  - `segment` is `BFO-FUT`.
-  - `strike` is not used.
+For StratX, before writing `trades.csv`, it also calls:
 
-In all StratX orders:
+```python
+brokerObj.retry_failed_orderbook_orders(data)
+```
 
-- `exchange` must be `NSEFO` or `BSEFO` as appropriate.
-- `producttype` must be `DELIVERY`.
+Then it writes the latest orderbook data to:
 
----
+```text
+trades.csv
+```
 
-## 7) Configuration in `credentials.py`
+This file is a local snapshot used for status lookup and visibility.
 
-Key settings:
+### `execute_with_retry(place_fn, args, lot_size=None)`
 
-- `broker`: `"STRATX"` or `"GREEK"`
-- `pathNSE` / `pathBSE`: File path templates with `{formatted_date}` (`pathNSE='C:/AutoOnlineBackup/NSE/FO/{formatted_date}AUTOTRD.txt'`, `pathBSE='C:/AutoOnlineBackup/BSE/FO/{formatted_date}AUTOTRD.txt'`)
-- `multiplier`: Multiplies order quantity (default `1`)
-- Freeze limits:
+This wrapper currently calls the broker placement function once:
 
-  - `niftyFreeze`, `bnfFreeze`, `sensexFreeze`, `bankex`, `midcpnifty`, `finnifty`
-- StratX credentials:
+```python
+for _ in range(1):
+    orders = place_fn(*args)
+```
 
-  - `id = "DUMMYUSER" `
-  - `secret_key = "SECRETKEY@123"`
-  - `client_id = "C97263"`
-  - `stratX_url = "uatapi.stratx.in"`
-- Greeksoft credentials (currently commented in file):
+There is old self-trade retry logic inside the function, but it is commented out.
 
-  - `urll = "11.111.11.114:3333"`
-  - `username = "TS111"`
-  - `pw = "PASSWORD123"`
-  - `authurl = "http://greekapi.greeksoft.in:3001"`
-  - `iprocli="1"`
-  - `AccountNumber="C12345"`
-- `optionInstrumentPath`:
+### `nse_worker()`
 
-  - Comes from `OPTION_INSTRUMENT_CSV` in .env.
-  - Required for `STRATX`, especially BSE order placement.
+Each NSE worker:
 
-  ---
+1. Waits for market hours.
+2. Reads one item from `NSE_QUEUE`.
+3. Extracts fields from the NSE row.
+4. Validates symbol, quantity, and strike.
+5. Dispatches to the selected broker:
+   - Greeksoft: `brokerObj.placeOrder(...)`
+   - StratX: `brokerObj.placeOrderStratX_NSE(...)`
+6. Calls `NSE_QUEUE.task_done()`.
 
-## 8) Logs and Outputs
+For StratX, the queue item includes an enqueue timestamp:
 
-- Logs are written to `logs/<dd_mm_yy>.txt`.
-- `trades.csv` is continuously rewritten with the broker’s order book.
-- Console output is printed with timestamps and also written to logs.
+```python
+(row, time.perf_counter())
+```
 
----
+That timestamp is used for order timing logs.
 
-## 9) Running the System
+### `bse_worker()`
 
-1. Run the GUI wrapper:
-   - `python zzEXE.py`
-2. Click 'Start Algo'
+Each BSE worker follows the same pattern as the NSE worker, but reads BSE-specific columns and dispatches:
 
-The GUI just starts `zFinalMulti.py` in a background thread and shows logs in a window.
+- Greeksoft: `brokerObj.placeOrderBSE(...)`
+- StratX: `brokerObj.placeOrderStratX_BSE(...)`
 
----
+### CSV Processing And Combining
 
-## 10) Common Failure Points to Watch
+The runtime has two CSV processing functions:
 
-- Missing or wrong `OPTION_INSTRUMENT_CSV` (StratX will fail at startup).
-- CSV input files not updating or incorrect formats.
-- Wrong broker selection in `credentials.py`.
-- Broker API credentials not valid.
-- Market closed: trades will be skipped.
+```python
+process_nse_csv()
+process_bse_csv()
+```
+
+They are called by both:
+
+- `file_watcher.py` callbacks,
+- fallback polling loop.
+
+Shared CSV state is protected by:
+
+```python
+csv_state_lock
+```
+
+State variables:
+
+```python
+nse_seen
+bse_seen
+last_nse
+last_bse
+nse_last_mtime
+bse_last_mtime
+```
+
+This prevents duplicate processing when a file watcher event and fallback poll happen close together.
+
+#### Current Combine Logic
+
+For NSE:
+
+```python
+qty_col = 14
+exchange_order_id_col = 23
+```
+
+For BSE:
+
+```python
+qty_col = 7
+exchange_order_id_col = 16
+```
+
+The code groups new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
+
+Important behavior:
+
+- Only rows seen in the same CSV processing batch can combine together.
+- If related rows appear in different batches, they are processed separately.
+
+### File Watcher And Fallback Polling
+
+`zFinalMulti.py` tries to start:
+
+```python
+start_file_watcher(csvPathNSE, csvPathBSE, ...)
+```
+
+If the watcher starts, CSV changes are detected immediately by watchdog events.
+
+The fallback loop still runs every:
+
+```python
+FALLBACK_POLL_INTERVAL = 5.0
+```
+
+This is a safety net in case a file event is missed.
+
+## Logging
+
+Logging is routed through `async_logger.py`.
+
+The log format is:
+
+```text
+[HH:MM:SS] : message
+```
+
+Logs are written to:
+
+```text
+logs/<DD_MM_YY>.txt
+```
+
+and also printed to stdout / GUI output.
+
+### Important Live Logs
+
+CSV ingestion:
+
+```text
+NSE: Added X combined trades from Y rows
+BSE: Added X combined trades from Y rows
+```
+
+Order submit timing:
+
+```text
+ORDER_SUBMIT_TIMING | sym=... | side=... | qty=... | price=... | total=...ms | queue=...ms | broker_prep=...ms | price_calc=...ms
+```
+
+Meaning:
+
+- `total`: time from CSV enqueue to submitting the HTTP future.
+- `queue`: time spent waiting in `NSE_QUEUE` or `BSE_QUEUE`.
+- `broker_prep`: broker-side preparation excluding price calculation.
+- `price_calc`: price calculation time, including OTM price calculation if that strategy creates an OTM leg.
+
+StratX HTTP result:
+
+```text
+STRATX_HTTP_SUCCESS | sym=... | side=... | qty=... | price=... | description=... | ref_id=... | order_queue=...ms | http=...ms | response=...
+```
+
+Meaning:
+
+- `order_queue`: time after submitting to the StratX HTTP thread pool before the worker starts the request.
+- `http`: StratX POST request duration for that attempt.
+
+StratX failed-order retry:
+
+```text
+STRATX_ORDERBOOK_RETRY_SUBMIT | root_id=... | clients=... | sym=... | side=... | qty=... | price=... | description=... | retry_ref_source=...
+```
+
+This logs once per retry batch, not once per client.
+
+## Shared Helpers In `helperGS.py`
+
+### `printt()`, `saveInLogFile()`, And `createLogFile()`
+
+These keep the old helper API intact while routing logs through `async_logger.py`.
+
+- `printt()` is the normal project log function.
+- `saveInLogFile()` is retained for compatibility and routes to the same async logger.
+- `createLogFile()` creates/opens today's log file and initializes async logging.
+
+### `wait_for_greek_order_slot()`
+
+Implements a simple Greeksoft order rate limiter.
+
+Current rate:
+
+```python
+MAX_GREEK_ORDERS_PER_SEC = 9
+```
+
+The function uses a timestamp deque and sleeps until a new order slot is available.
+
+### `getFreezeQua(freeze_limit, lot_size, total_quantity)`
+
+Splits a large quantity into freeze-limit-safe chunks.
+
+It makes sure each chunk is aligned to lot size:
+
+```python
+qty = (qty // int(lot_size)) * int(lot_size)
+```
+
+Greeksoft uses this for split order placement.
+
+### `round_to_tick(price, tick)`
+
+Rounds a price to the nearest tick size.
+
+### `adjust_price_to_tick(price, tick_size, side, market_order_offset)`
+
+Applies a marketable-limit offset to a fallback price:
+
+- BUY: price is moved up.
+- SELL: price is moved down.
+
+If the price is less than or equal to 50, the fixed point offset is `market_order_offset`. Otherwise, percentage offset is used.
+
+## Greeksoft Broker Flow
+
+The Greeksoft broker implementation is the `greeksoft` class in `helperGS.py`.
+
+### Initialization
+
+When `greeksoft()` is created:
+
+1. It calls the Greeksoft auth API to get a session token.
+2. It downloads the Greeksoft instrument master.
+3. It logs in to get `gcid`.
+
+### `login()`
+
+Calls:
+
+```text
+http://<urll>/getLoginInfo
+```
+
+It stores:
+
+```python
+self.gcid
+```
+
+This value is required for order placement and orderbook APIs.
+
+### `getInstrument()`
+
+Calls:
+
+```text
+http://<urll>/getAllContract
+```
+
+The response is parsed into:
+
+```python
+self.df
+```
+
+It also writes:
+
+```text
+abc.csv
+```
+
+for local inspection.
+
+### `getData(t)`
+
+Finds the matching NSE instrument row from `self.df`.
+
+It matches:
+
+- expiry from `t[4]`,
+- symbol from `t[3]`,
+- strike from `t[5]`,
+- option type from `t[6]`.
+
+The returned row contains the Greek token, lot size, symbol, and other contract data needed by `placeOrder()`.
+
+### `getDataBSE(t)`
+
+Finds the matching BSE instrument by exchange token.
+
+The BSE worker passes:
+
+```python
+t[4]
+```
+
+as the exchange token.
+
+### `placeOrder(...)`
+
+Places Greeksoft NSE orders.
+
+Inputs:
+
+- Greek token,
+- side,
+- symbol,
+- lot count,
+- quantity,
+- instrument row.
+
+Flow:
+
+1. Select freeze limit by symbol.
+2. Split total quantity using `getFreezeQua()`.
+3. Convert each quantity chunk to lots.
+4. Wait for Greeksoft rate-limit slot.
+5. Send `NewOrderRequest` to Greeksoft.
+6. Return the list of Greeksoft order IDs.
+
+The payload uses:
+
+- exchange: `NSE`,
+- order type: `2`,
+- product: `0`,
+- strategyName: `AlgoSelf`,
+- `iprocli` and `AccountNumber` from `credentials.py`.
+
+### `placeOrderBSE(...)`
+
+Same idea as `placeOrder()`, but for BSE:
+
+- exchange: `BSE`,
+- symbols use SENSEX/BANKEX freeze limits,
+- side is converted to Greeksoft numeric side.
+
+For both Greeksoft NSE and BSE orders, `iprocli` and `AccountNumber` come from `credentials.py`. Use:
+
+- `iprocli = "0"` for retailer,
+- `iprocli = "1"` for dealer through retailer,
+- `iprocli = "2"` for dealer.
+
+`AccountNumber` is required for dealer-through-retailer orders. Otherwise it can be kept empty.
+
+### `getOrderStatus(orderId)`
+
+Reads `trades.csv` and finds a matching Greeksoft order id:
+
+```python
+gorderid == orderId
+```
+
+### `getOrderBookALL()`
+
+Calls Greeksoft orderbook API:
+
+```text
+getOrderBookDetailWithLegV2
+```
+
+The orderbook thread writes the returned data into `trades.csv`.
+
+## StratX Broker Flow
+
+The StratX broker implementation is the `StratX` class in `helperGS.py`.
+
+StratX has more parts because it handles:
+
+- instrument master preloading,
+- Redis LTP/average lookup,
+- circuit limit clamping,
+- HTTP session pooling,
+- orderbook-based retry,
+- broadcast-client retry tracking.
+
+### Complete StratX Flow
+
+The live StratX path works like this:
+
+1. `zFinalMulti.py` starts and checks that `OPTION_INSTRUMENT_CSV` is configured.
+2. `StratX()` is created and the instrument master is loaded from `cre.optionInstrumentPath`.
+3. The instrument master is filtered and cached so BSE contracts, tick sizes, OTM descriptions, and retry lookups are fast.
+4. The orderbook polling thread starts and repeatedly calls `getOrderBookALL()`.
+5. When a new NSE or BSE source trade row is detected, `zFinalMulti.py` combines rows by exchange order id and pushes the combined row into the NSE or BSE queue.
+6. A worker validates market hours, symbol, quantity, and basic option fields.
+7. The worker calls either `placeOrderStratX_NSE()` or `placeOrderStratX_BSE()`.
+8. NSE fields are read directly from the NSE trade row. BSE fields are resolved from the instrument master using `ExchangeInstrumentID` and `Description`.
+9. The code decides exchange, segment, symbol, expiry, right, strike, quantity, and freeze split.
+10. Price is recalculated from Redis average(last 30 sec avg LTP), rounded to tick, and clamped to circuit limits.
+11. `place_stratx_single_order()` builds the final StratX payload and submits it to the StratX HTTP worker pool.
+12. `send_stratx_order_request()` posts the payload to StratX and reads the returned `reference_id`.
+13. The returned `reference_id` is mapped to the internal `root_order_id`.
+14. The orderbook thread writes the latest rows into `trades.csv`.
+15. If a row is `CANCEL`, or `REJECTED` with both `PRICE` and `LPP` in `order_message` (for 'Price not in LPP range' issue), `retry_failed_orderbook_orders()` checks whether that specific client is still eligible for retry.
+16. Retry orders reuse the same root id but send only the failed `client_ids`, so late-arriving failed clients can still retry independently.
+
+Original StratX orders normally broadcast with:
+
+```python
+"client_ids": []
+```
+
+Retry orders are client-specific:
+
+```python
+"client_ids": ["FAILED_CLIENT_1", "FAILED_CLIENT_2"]
+```
+
+### StratX Class Settings
+
+Important class-level settings:
+
+```python
+market_order_offset = 8
+instrument_names_to_load = {"NIFTY", "SENSEX"}
+redis_ltp_avg_cache_ttl = 0.2
+stratx_order_workers = 20
+stratx_request_timeout = 5
+stratx_http_max_attempts = 1
+stratx_http_retry_sleep = 0.3
+retry_state_file = "state.json"
+retry_state_save_interval = 1
+max_orderbook_retries = 1
+```
+
+Notes:
+
+- `stratx_http_max_attempts = 1` means HTTP non-200 retry is currently effectively disabled (increase it to retry the failed requests).
+- `max_orderbook_retries = 1` means each client under a root order gets one orderbook-level retry.
+- `instrument_names_to_load = {"NIFTY", "SENSEX"}` means the StratX instrument master is filtered to those names.
+
+### `load_instrument_master()`
+
+Loads the StratX instrument CSV from:
+
+```python
+cre.optionInstrumentPath
+```
+
+It builds normalized dataframe columns and precomputed maps:
+
+```python
+tick_size_by_name
+bse_contract_by_id_desc
+otm_description_by_key
+retry_instrument_by_key
+```
+
+These maps avoid repeated dataframe scans in live order paths.
+
+### `to_yyyymmdd(date_str)` And `to_ddmmmyy(date_str)`
+
+Cached date conversion helpers.
+
+`to_yyyymmdd()` is used for StratX payload expiry:
+
+```text
+YYYYMMDD
+```
+
+`to_ddmmmyy()` is used for Redis cache symbols:
+
+```text
+DDMMMYY
+```
+
+### `get_bse_contract_details(exchange_instrument_id, description)`
+
+Converts BSE order rows into usable StratX fields.
+
+It returns:
+
+```python
+(symbol, strike, expiry, right, tick_size)
+```
+
+It first checks `bse_contract_by_id_desc`, then falls back to dataframe filtering.
+
+### `get_otm_strike(symbol, right, strike, offset)`
+
+Calculates OTM strike:
+
+- NIFTY step: 50
+- SENSEX step: 100
+
+For CE, strike increases. For PE, strike decreases.
+
+### `get_otm_description(symbol, expiry_yyyymmdd, right, strike)`
+
+Finds the StratX compact instrument `Description` for OTM legs.
+
+It first checks `otm_description_by_key`, then falls back to dataframe filtering.
+
+### Redis And Circuit Helpers
+
+`get_redis_ltp_avg(cache_symbol)` reads:
+
+```text
+cache:LTP_<CACHE_SYMBOL>
+```
+
+from Redis and returns:
+
+```python
+(ltp, avg)
+```
+
+`apply_circuit_clamp(price, description)`:
+
+1. Finds `ExchangeInstrumentID` from the instrument dataframe.
+2. Reads circuit limits from Redis.
+3. Uses limits only if Redis timestamp is not older than 300 seconds.
+4. Clamps price to LC/UC when required.
+
+### `price_from_avg_ltp_or_fallback(...)`
+
+This is the central StratX price calculattion part.
+
+For normal copied orders:
+
+- it reads Redis avg or LTP when available for instrument symbol, else use fallback price from the source trade row,
+- it then applies offset for market order,
+- it rounds to tick size,
+- at last clamps to circuit limits.
+
+For retry and OTM pricing:
+
+```python
+for_otm_strike=True
+```
+
+This disables fallback pricing. If Redis LTP is missing, the order is not placed using stale source price.
+
+Current live offset behavior:
+
+- BUY: price moves above LTP/avg.
+- SELL: price moves below LTP/avg.
+
+### `place_stratx_single_order(...)`
+
+Builds the final StratX JSON payload and submits it asynchronously to the StratX HTTP thread pool.
+
+Important payload fields:
+
+```python
+"client_ids": payload_client_ids
+"strategy_name": strategy_name
+"symbol": symbol
+"strike": strike
+"expiry": expiry
+"buyorsell": side
+"producttype": "DELIVERY"
+"ordertype": "LIMIT"
+"quantity": quantity
+"price": price
+"exchange": exchange
+"segment": segment
+"right": right
+"quantity_split": freez
+```
+
+For original broadcast orders:
+
+```python
+client_ids=None
+```
+
+becomes:
+
+```python
+"client_ids": []
+```
+
+StratX expands that to all mapped clients.
+
+For retry orders, the function receives a specific `client_ids` list and retries only those failed clients.
+
+The function also creates a `root_order_id` UUID if one was not provided. That root id is used by the retry system.
+
+### `send_stratx_order_request(...)`
+
+Runs in the StratX HTTP thread pool.
+
+Flow:
+
+1. Gets a thread-local `requests.Session`.
+2. Posts the payload to StratX.
+3. If HTTP status is not 200 and more attempts are allowed (`stratx_http_max_attempts>1`), recalculates price and retries.
+4. Parses response JSON.
+5. Extracts `reference_id`.
+6. Logs `STRATX_HTTP_SUCCESS`.
+7. Returns the `reference_id`.
+
+### `log_stratx_future_result(future)`
+
+Runs when the HTTP future completes.
+
+If the request succeeded:
+
+1. Reads the returned `reference_id`.
+2. Maps that reference id to the original `root_order_id`.
+3. Logs `STRATX_FUTURE_DONE`.
+
+If the request failed:
+
+1. Removes the future from pending root tracking.
+2. Logs `STRATX_FUTURE_FAILED`.
+
+### `placeOrderStratX_NSE(...)`
+
+Places StratX NSE orders.
+
+NSE source columns used:
+
+| Field           | Column                                    |
+| --------------- | ----------------------------------------- |
+| Instrument type | `trade[2]`                              |
+| Symbol          | `trade[3]`                              |
+| Expiry          | `trade[4]`                              |
+| Strike          | `trade[5]`                              |
+| Right           | `trade[6]`                              |
+| Description     | `trade[7]`                              |
+| Side            | worker converts `trade[13]` to BUY/SELL |
+| Quantity        | `trade[14] * multiplier`                |
+| Source price    | `trade[15]`                             |
+
+Segments:
+
+- options: `NFO-OPT`
+- futures: `NFO-FUT`
+
+Exchange:
+
+```text
+NSEFO
+```
+
+Payload-level details:
+
+- product type: `DELIVERY`
+- order type: `LIMIT`
+- right: `CE`, `PE`, or `FUT`
+- expiry is converted to `YYYYMMDD`
+- quantity is `trade[14] * multiplier`
+- source price starts from `trade[15]`, then StratX price logic recalculates/clamps it
+- quantity split uses the configured freeze limit for the symbol
+
+Strategy-specific behavior:
+
+- `VOLATILITY CORE`: places main leg and OTM leg with offset 2.
+- `IMPULSE CORE`: places OTM leg with offset 1.
+- Other strategy names: places the original leg.
+
+### `placeOrderStratX_BSE(...)`
+
+Places StratX BSE orders.
+
+BSE source columns used:
+
+| Field                | Column                    |
+| -------------------- | ------------------------- |
+| ExchangeInstrumentID | `trade[4]`              |
+| Description          | `trade[5]`              |
+| Side                 | `trade[6]`, B/S         |
+| Quantity             | `trade[7] * multiplier` |
+| Source price         | `trade[8]`              |
+
+BSE contract details are resolved from the instrument master.
+
+Payload symbol mapping:
+
+- `SENSEX` becomes `BSX`
+- `BANKEX` becomes `BKX`
+
+Segments:
+
+- options: `BFO-OPT`
+- futures: `BFO-FUT`
+
+Exchange:
+
+```text
+BSEFO
+```
+
+Payload-level details:
+
+- product type: `DELIVERY`
+- order type: `LIMIT`
+- right: `CE`, `PE`, or `FUT`
+- expiry, strike, right, and tick size are resolved from the instrument master using `ExchangeInstrumentID` and `Description`
+- quantity is `trade[7] * multiplier`
+- source price starts from `trade[8]`, then StratX price logic recalculates/clamps it
+- quantity split uses the freeze limit for the resolved underlying index
+
+Strategy-specific behavior mirrors NSE for SENSEX options:
+
+- `VOLATILITY CORE`: main leg plus OTM leg with offset 2.
+- `IMPULSE CORE`: OTM leg with offset 1.
+- Other strategy names: original leg.
+
+## StratX Orderbook Retry
+
+The StratX retry system is for orders that were accepted by the placement API, received a `reference_id`, and later appeared in the orderbook as failed.
+
+It is not the same as HTTP retry.
+
+### Retryable Status
+
+Implemented in:
+
+```python
+is_retryable_orderbook_status(row)
+```
+
+Retry is allowed for:
+
+```text
+status == CANCEL
+```
+
+or:
+
+```text
+status == REJECTED
+and order_message contains PRICE
+and order_message contains LPP
+```
+
+This avoids retrying every rejection blindly. Margin/RMS/broker rejections should generally not be retried automatically.
+
+### Why Retry Is Client-Aware
+
+A normal live StratX broadcast order uses:
+
+```python
+"client_ids": []
+```
+
+That tells StratX to place the order for all mapped clients. The app does not know every client at placement time.
+
+The orderbook later returns one row per client. Some clients may appear earlier than others.
+
+So retry count cannot be stored only on `reference_id`. If the first fetch shows 60 failed clients and the second fetch shows 20 more under the same reference, those 20 must still be eligible.
+
+The current model stores retry count by:
+
+```text
+root_order_id + client_id
+```
+
+### Root And Reference Mapping
+
+Every intended StratX order gets an internal root id:
+
+```text
+root_order_id
+```
+
+When StratX returns a reference:
+
+```text
+reference_id -> root_order_id
+```
+
+Retries reuse the same root id and create new StratX references.
+
+Example:
+
+```text
+R1 -> U1
+R2 -> U1
+R3 -> U1
+```
+
+The reference tells the retry processor which root order the failed row belongs to.
+
+### State File
+
+Retry state is saved in:
+
+```text
+state.json
+```
+
+Shape:
+
+```json
+{
+  "date": "YYYYMMDD",
+  "reference_id_to_root_id": {
+    "REFERENCE_ID": "ROOT_UUID"
+  },
+  "retry_by_root": {
+    "ROOT_UUID": {
+      "retry_count_by_client": {
+        "CLIENT_ID": 1
+      },
+      "processed_refs_by_client": {
+        "CLIENT_ID": ["REFERENCE_ID"]
+      }
+    }
+  }
+}
+```
+
+On a new day, state resets automatically.
+
+The background saver writes state only when dirty. It writes to `state.json.tmp` and then uses `os.replace()` so the state file is not left half-written.
+
+`zzEXE.py` also calls `save_retry_state_now()` before closing the app.
+
+### `retry_failed_orderbook_orders(rows)`
+
+Runs inside the orderbook thread.
+
+For each orderbook row:
+
+1. Check if status is retryable.
+2. Read `reference_id`.
+3. Read `client_id`.
+4. Find root id using `reference_id_to_root_id`.
+5. Skip if this client already processed this reference.
+6. Skip if this client reached `max_orderbook_retries`.
+7. Mark the reference processed for this client.
+8. Increment this client's retry count.
+9. Group failed rows by reference_ids, so we place retry for the all the clients belonging to that refernce_id.
+10. Submit one retry per group.
+
+### `get_retry_group_key(...)`
+
+Builds a grouping key so one retry order can cover many failed clients that share the same root, failed reference, retry number, and order details.
+
+### `retry_single_orderbook_row(...)`
+
+Reconstructs a retry order from the orderbook row:
+
+- symbol,
+- exchange,
+- segment,
+- right,
+- side,
+- strategy name,
+- expiry,
+- quantity,
+- strike,
+- price / initiated price.
+
+It recalculates price from fresh Redis LTP/avg and circuit data. It does not retry all clients. It passes only the failed `client_ids` for that group.
+
+## Standalone StratX Orderbook Export
+
+`fetch_order_book.py` is a separate utility script.
+
+It:
+
+1. Calls StratX report API page by page.
+2. Fetches up to `MAX_PAGES`.
+3. Saves the result to:
+
+```text
+Trades/YYYYMMDD.csv
+```
+
+It also logs to:
+
+```text
+fetch_order_book.log
+```
+
+Use this when you want a separate historical/orderbook export outside the live engine.
+
+## Circuit And Redis Support
+
+`fetch_circuit.py` contains:
+
+### `get_redis_client(...)`
+
+Creates a shared Redis client. Current defaults:
+
+```python
+host="100.103.231.7"
+port=6379
+db=1
+```
+
+### `get_exchange_instrument_id(description, df)`
+
+Finds `ExchangeInstrumentID` in the StratX instrument dataframe using the instrument `Description`.
+
+It caches:
+
+```text
+description -> ExchangeInstrumentID
+```
+
+### `get_circuit_limits(instrument_id, ...)`
+
+Reads:
+
+```text
+cache:CIRCUIT_<instrument_id>
+```
+
+from Redis and returns:
+
+```python
+{"ts": ..., "UC": ..., "LC": ...}
+```
+
+Successful responses are cached for 10 seconds.
+
+## File Watcher
+
+`file_watcher.py` uses `watchdog`.
+
+It watches the directories containing the NSE and BSE trade files and reacts to:
+
+- modified events,
+- created events,
+- moved events.
+
+`CsvChangeHandler` uses per-file `threading.Event()` flags to avoid re-entering the same processing function while it is already running.
+
+## Async Logger
+
+`async_logger.py` keeps log writes out of the order hot path.
+
+It uses:
+
+```python
+logging.handlers.QueueHandler
+logging.handlers.QueueListener
+```
+
+The caller queues the message and continues. A background listener writes to stdout and the daily log file.
+
+If async logging fails, `fallback_log()` writes directly to stdout and file.
+
+## GUI Wrapper
+
+`zzEXE.py` creates a small Tkinter GUI.
+
+The Start Algo button runs:
+
+```python
+exec_script('zFinalMulti.py', on_algo_complete)
+```
+
+Output is redirected into a scrollable text area.
+
+On close:
+
+1. It tries to call `brokerObj.save_retry_state_now()` if the broker object exists and supports it.
+2. It destroys the Tkinter root.
+3. It calls `os._exit(0)` to terminate background threads.
+
+## Setup
+
+1. Create and activate a virtual environment.
+2. Install requirements:
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Configure `.env`:
+
+```env
+OPTION_INSTRUMENT_CSV=C:/path/to/options_instruments.csv
+```
+
+4. Edit `credentials.py`:
+
+- choose `broker`,
+- confirm NSE/BSE CSV paths,
+- fill broker credentials,
+- confirm freeze quantities,
+- set `strategy_name` for `STRATX`,
+- set `multiplier`.
+
+5. Start with:
+
+```bat
+run.cmd
+```
+
+## Common Troubleshooting
+
+### StratX says instrument file not found
+
+Check `.env`:
+
+```env
+OPTION_INSTRUMENT_CSV=...
+```
+
+and confirm the file exists before starting.
+
+### Orders are not consumed
+
+Check market time. Workers sleep outside:
+
+```text
+09:15 to 15:30
+```
+
+### StratX retry is not happening
+
+Check:
+
+- row status is `CANCEL`, or `REJECTED` with both `PRICE` and `LPP` in `order_message`,
+- `reference_id` exists,
+- `client_id` exists,
+- `reference_id` is mapped in `state.json`,
+- client has not reached `max_orderbook_retries`.
+
+### StratX OTM or retry price fails
+
+OTM/retry pricing requires Redis LTP data. With `for_otm_strike=True`, the code intentionally avoids fallback to stale source price.
