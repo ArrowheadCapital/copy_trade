@@ -353,7 +353,7 @@ if BROKER == "STRATX":
     brokerObj.start_retry_state_saver()
     brokerObj.warmup_stratx_sessions()
 
-# ================= START 50 WORKERS =================
+# ================= START 40 WORKERS =================
 NSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 BSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 

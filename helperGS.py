@@ -471,7 +471,7 @@ class StratX:
     redis_ltp_avg_cache_ttl = 0.2
     stratx_order_workers = 20
     stratx_request_timeout = 5
-    stratx_http_max_attempts = 1
+    stratx_http_max_attempts = 2
     stratx_http_retry_sleep = 0.3
     stratx_thread_local = threading.local()
     stratx_order_pool = ThreadPoolExecutor(
@@ -1419,7 +1419,7 @@ class StratX:
             printt(f"Error in get_retry_instrument_details: {e}")
             return None, None
 
-    def retry_single_orderbook_row(self, row, root_order_id, client_ids):
+    def retry_single_orderbook_row(self, row, root_order_id, client_ids, retry_batch_start_ts=None):
         try:
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
             symbol = str(self.get_orderbook_row_value(row, "symbol", "")).strip().upper()
@@ -1429,6 +1429,12 @@ class StratX:
             side = str(self.get_orderbook_row_value(row, "buyorsell", "")).strip().upper()
             strategy_name = str(self.get_orderbook_row_value(row, "strategy_name", cre.strategy_name)).strip()
             expiry = str(self.get_orderbook_row_value(row, "expiry", "")).strip()
+
+            retry_single_start_ts = time.perf_counter()
+            timing_ctx = {
+                "worker_dequeue_ts": retry_single_start_ts,
+                "broker_entry_ts": retry_single_start_ts,
+            }
 
             if not symbol or not exchange or not segment or not right or not side or not expiry:
                 raise ValueError(f"Missing retry row fields: {row}")
@@ -1465,6 +1471,7 @@ class StratX:
                 expiry_ddmmmyy = self.to_ddmmmyy(expiry)
                 cache_symbol = self.build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
 
+            _t0 = time.perf_counter()
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 base_price=base_price,
@@ -1473,6 +1480,7 @@ class StratX:
                 cache_symbol=cache_symbol,
                 for_otm_strike=True,
             )
+            timing_ctx["price_calc_ms"] = (time.perf_counter() - _t0) * 1000
 
             printt(f"STRATX_ORDERBOOK_RETRY_SUBMIT | root_id={root_order_id} | clients={len(client_ids)} | sym={payload_symbol} | side={side} | qty={quantity} | price={price} | description={description} | retry_ref_source={self.get_orderbook_row_value(row, 'reference_id', '')}")
 
@@ -1489,6 +1497,8 @@ class StratX:
                 segment,
                 right,
                 freez,
+                csv_read_ts=retry_batch_start_ts,
+                timing_ctx=timing_ctx,
                 root_order_id=root_order_id,
                 client_ids=client_ids,
                 description=description,
@@ -1525,6 +1535,7 @@ class StratX:
                 return
             if not StratX.retry_state_loaded:
                 self.load_retry_state()
+            retry_batch_start_ts = time.perf_counter()
 
             eligible_groups = {}
 
@@ -1597,6 +1608,7 @@ class StratX:
                         group["row"],
                         group["root_order_id"],
                         client_ids,
+                        retry_batch_start_ts,
                     )
                 except Exception as group_error:
                     printt(f"STRATX_ORDERBOOK_RETRY_GROUP_SUBMIT_ERROR | root_id={group.get('root_order_id')} | clients={len(group.get('client_ids', []))} | error={group_error}")
