@@ -9,13 +9,14 @@ import sys
 log_queue = queue.SimpleQueue()
 listener = None
 logger = logging.getLogger("trade")
-log_format = "[%(asctime)s] : %(message)s"
+log_format = "[%(asctime)s.%(msecs)03d] : %(message)s"
 date_format = "%H:%M:%S"
 
 
 def fallback_log(*args, **kwargs):
     try:
-        timestamp = datetime.datetime.now().strftime("[%H:%M:%S] :")
+        now = datetime.datetime.now()
+        timestamp = f"[{now:%H:%M:%S}.{now.microsecond // 1000:03d}] :"
         msg = " ".join(map(str, args))
         if kwargs:
             msg += " " + " ".join(f"{key}={value}" for key, value in kwargs.items())
