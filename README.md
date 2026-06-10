@@ -1103,6 +1103,20 @@ Shape:
         "CLIENT_ID": ["REFERENCE_ID"]
       }
     }
+  },
+  "order_meta_by_root": {
+    "ROOT_UUID": {
+      "quantity": 20,
+      "symbol": "NIFTY",
+      "strike": 25100,
+      "expiry": "YYYYMMDD",
+      "side": "BUY",
+      "exchange": "NSEFO",
+      "segment": "NFO-OPT",
+      "right": "CE",
+      "strategy_name": "STRATEGY",
+      "description": "INSTRUMENT DESCRIPTION"
+    }
   }
 }
 ```
@@ -1127,12 +1141,14 @@ For each orderbook row:
 6. Skip if this client reached `max_orderbook_retries`.
 7. Mark the reference processed for this client.
 8. Increment this client's retry count.
-9. Group failed rows by reference_ids, so we place retry for the all the clients belonging to that refernce_id.
+9. Group failed rows by root/reference/order details without using orderbook quantity.
 10. Submit one retry per group.
 
 ### `get_retry_group_key(...)`
 
 Builds a grouping key so one retry order can cover many failed clients that share the same root, failed reference, retry number, and order details.
+
+The grouping key does not include orderbook `quantity`, because StratX orderbook quantity can already include API-side client multipliers.
 
 ### `retry_single_orderbook_row(...)`
 
@@ -1145,9 +1161,10 @@ Reconstructs a retry order from the orderbook row:
 - side,
 - strategy name,
 - expiry,
-- quantity,
 - strike,
 - price / initiated price.
+
+Retry quantity is loaded from `order_meta_by_root[root_order_id]["quantity"]`, which is the original quantity this code submitted to StratX before API-side multipliers. It does not fall back to orderbook quantity, because that can multiply the retry quantity a second time.
 
 It recalculates price from fresh Redis LTP/avg and circuit data. It does not retry all clients. It passes only the failed `client_ids` for that group.
 

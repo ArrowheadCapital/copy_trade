@@ -471,7 +471,7 @@ class StratX:
     redis_ltp_avg_cache_ttl = 0.2
     stratx_order_workers = 20
     stratx_request_timeout = 5
-    stratx_http_max_attempts = 1
+    stratx_http_max_attempts = 2
     stratx_http_retry_sleep = 0.3
     stratx_thread_local = threading.local()
     stratx_order_pool = ThreadPoolExecutor(
@@ -480,7 +480,7 @@ class StratX:
     )
     retry_state_file = "state.json"
     retry_state_save_interval = 1
-    max_orderbook_retries = 0
+    max_orderbook_retries = 1
     retry_state_lock = threading.Lock()
     retry_state_dirty = False
     retry_state_loaded = False
@@ -573,6 +573,7 @@ class StratX:
             "date": self.get_retry_state_date(),
             "reference_id_to_root_id": {},
             "retry_by_root": {},
+            "order_meta_by_root": {},
         }
     
     def normalize_retry_by_root_state(self, retry_by_root):
@@ -651,6 +652,44 @@ class StratX:
             printt(f"STRATX_RETRY_STATE_SERIALIZE_FAILED | error={e}")
             return {}
 
+    def normalize_order_meta_by_root_state(self, order_meta_by_root):
+        try:
+            normalized = {}
+            if not isinstance(order_meta_by_root, dict):
+                return normalized
+
+            for root_order_id, meta in order_meta_by_root.items():
+                if not isinstance(meta, dict):
+                    continue
+                root_key = str(root_order_id).strip()
+                if not root_key:
+                    continue
+
+                cleaned = dict(meta)
+                try:
+                    cleaned["quantity"] = int(float(cleaned.get("quantity", 0)))
+                except Exception:
+                    cleaned["quantity"] = 0
+                normalized[root_key] = cleaned
+
+            return normalized
+        except Exception as e:
+            printt(f"STRATX_ORDER_META_NORMALIZE_FAILED | error={e}")
+            return {}
+
+    def serialize_order_meta_by_root_state(self, order_meta_by_root):
+        try:
+            if not isinstance(order_meta_by_root, dict):
+                return {}
+            return {
+                str(root_order_id): dict(meta)
+                for root_order_id, meta in order_meta_by_root.items()
+                if isinstance(meta, dict)
+            }
+        except Exception as e:
+            printt(f"STRATX_ORDER_META_SERIALIZE_FAILED | error={e}")
+            return {}
+
     def get_retry_root_state(self, root_order_id):
         retry_by_root = StratX.retry_state.setdefault("retry_by_root", {})
         root_state = retry_by_root.setdefault(
@@ -686,6 +725,7 @@ class StratX:
                     "date": today,
                     "reference_id_to_root_id": state.get("reference_id_to_root_id", {}) if isinstance(state.get("reference_id_to_root_id"), dict) else {},
                     "retry_by_root": self.normalize_retry_by_root_state(state.get("retry_by_root", {})),
+                    "order_meta_by_root": self.normalize_order_meta_by_root_state(state.get("order_meta_by_root", {})),
                 }
 
             with StratX.retry_state_lock:
@@ -711,6 +751,7 @@ class StratX:
                 "date": StratX.retry_state.get("date", self.get_retry_state_date()),
                 "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
                 "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
+                "order_meta_by_root": self.serialize_order_meta_by_root_state(StratX.retry_state.get("order_meta_by_root", {})),
             }
 
     def save_retry_state_now(self):
@@ -724,12 +765,13 @@ class StratX:
                     "date": StratX.retry_state.get("date", self.get_retry_state_date()),
                     "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
                     "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
+                    "order_meta_by_root": self.serialize_order_meta_by_root_state(StratX.retry_state.get("order_meta_by_root", {})),
                 }
                 StratX.retry_state_dirty = False
 
             temp_path = f"{StratX.retry_state_file}.tmp"
             with open(temp_path, "w") as state_file:
-                json.dump(state_snapshot, state_file)
+                json.dump(state_snapshot, state_file, indent=2)
             os.replace(temp_path, StratX.retry_state_file)
         except Exception as e:
             with StratX.retry_state_lock:
@@ -773,6 +815,42 @@ class StratX:
                 StratX.retry_state_dirty = True
         except Exception as e:
             printt(f"STRATX_FUTURE_ROOT_REGISTER_FAILED | root_id={root_order_id} | error={e}")
+
+    def register_order_meta(self, root_order_id, order_meta):
+        try:
+            root_key = str(root_order_id).strip()
+            if not root_key or not isinstance(order_meta, dict):
+                return
+
+            cleaned_meta = dict(order_meta)
+            try:
+                cleaned_meta["quantity"] = int(float(cleaned_meta.get("quantity", 0)))
+            except Exception:
+                cleaned_meta["quantity"] = 0
+
+            with StratX.retry_state_lock:
+                order_meta_by_root = StratX.retry_state.setdefault("order_meta_by_root", {})
+                existing_meta = order_meta_by_root.get(root_key)
+                if isinstance(existing_meta, dict):
+                    existing_meta.update({k: v for k, v in cleaned_meta.items() if k not in existing_meta or existing_meta.get(k) in (None, "")})
+                else:
+                    order_meta_by_root[root_key] = cleaned_meta
+                StratX.retry_state_dirty = True
+        except Exception as e:
+            printt(f"STRATX_ORDER_META_REGISTER_FAILED | root_id={root_order_id} | error={e}")
+
+    def get_order_meta(self, root_order_id):
+        try:
+            root_key = str(root_order_id).strip()
+            if not root_key:
+                return {}
+            with StratX.retry_state_lock:
+                order_meta_by_root = StratX.retry_state.setdefault("order_meta_by_root", {})
+                meta = order_meta_by_root.get(root_key, {})
+                return dict(meta) if isinstance(meta, dict) else {}
+        except Exception as e:
+            printt(f"STRATX_ORDER_META_GET_FAILED | root_id={root_order_id} | error={e}")
+            return {}
 
     def register_reference_root_id(self, future, reference_id):
         try:
@@ -1439,9 +1517,13 @@ class StratX:
             if not symbol or not exchange or not segment or not right or not side or not expiry:
                 raise ValueError(f"Missing retry row fields: {row}")
 
-            quantity = int(float(self.get_orderbook_row_value(row, "quantity", 0)))
+            order_meta = self.get_order_meta(root_order_id)
+            if not order_meta:
+                raise ValueError(f"Original order metadata missing for root_id={root_order_id}")
+
+            quantity = int(float(order_meta.get("quantity", 0)))
             if quantity <= 0:
-                raise ValueError(f"Invalid retry quantity: {quantity}")
+                raise ValueError(f"Invalid original retry quantity for root_id={root_order_id}: {quantity}")
 
             strike = self.get_orderbook_row_value(row, "strike", None)
             if right == "FUT":
@@ -1510,7 +1592,6 @@ class StratX:
     def get_retry_group_key(self, root_order_id, reference_id, retry_no, row):
         try:
             strike = self.get_orderbook_row_value(row, "strike", "")
-            quantity = self.get_orderbook_row_value(row, "quantity", "")
             return (
                 str(root_order_id),
                 str(reference_id),
@@ -1523,7 +1604,6 @@ class StratX:
                 str(self.get_orderbook_row_value(row, "strategy_name", cre.strategy_name)).strip(),
                 str(self.get_orderbook_row_value(row, "expiry", "")).strip(),
                 "" if strike is None else str(strike).strip(),
-                "" if quantity is None else str(quantity).strip(),
             )
         except Exception as e:
             printt(f"STRATX_ORDERBOOK_RETRY_GROUP_KEY_FAILED | error={e} | row={row}")
@@ -1666,6 +1746,19 @@ class StratX:
 
             if root_order_id is None:
                 root_order_id = str(uuid.uuid4())
+
+            self.register_order_meta(root_order_id, {
+                "quantity": int(float(quantity)),
+                "symbol": symbol,
+                "strike": strike,
+                "expiry": expiry,
+                "side": side,
+                "exchange": exchange,
+                "segment": segment,
+                "right": right,
+                "strategy_name": strategy_name,
+                "description": description,
+            })
 
             order_info = {
                 "client_ids": payload_client_ids,
