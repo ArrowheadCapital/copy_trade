@@ -429,6 +429,11 @@ def process_nse_csv():
             new_rows = df.iloc[nse_seen:]
             nse_seen = len(df)
 
+        pause_event = globals().get("copy_trade_paused")
+        if pause_event is not None and pause_event.is_set():
+            H.printt(f"NSE paused: skipped {len(new_rows)} new rows")
+            return
+
         new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
 
         qty_col = 14
@@ -482,6 +487,11 @@ def process_bse_csv():
                 return
             new_rows = df.iloc[bse_seen:]
             bse_seen = len(df)
+
+        pause_event = globals().get("copy_trade_paused")
+        if pause_event is not None and pause_event.is_set():
+            H.printt(f"BSE paused: skipped {len(new_rows)} new rows")
+            return
 
         new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
 

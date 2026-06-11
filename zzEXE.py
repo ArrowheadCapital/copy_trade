@@ -12,6 +12,7 @@ importlib.reload(cre)
 import heading as hed
 
 data = hed.data
+copy_trade_paused = threading.Event()
 
 class RedirectText(io.StringIO):
     def __init__(self, text_widget):
@@ -44,6 +45,16 @@ def run_algo():
 
 def on_algo_complete():
     algo_button.config(state='normal')
+
+def toggle_pause():
+    if copy_trade_paused.is_set():
+        copy_trade_paused.clear()
+        pause_button.config(text="Pause")
+        print("[INFO] Copy trade resumed")
+    else:
+        copy_trade_paused.set()
+        pause_button.config(text="Resume")
+        print("[INFO] Copy trade paused")
 
 def on_close():
     try:
@@ -140,6 +151,9 @@ button_frame.grid(row=1, column=0, pady=10)
 
 algo_button = ttk.Button(button_frame, text="Start Algo", command=run_algo, style="Start.TButton")
 algo_button.grid(row=0, column=0, padx=4, pady=4)
+
+pause_button = ttk.Button(button_frame, text="Pause", command=toggle_pause, style="Start.TButton")
+pause_button.grid(row=0, column=1, padx=4, pady=4)
 
 # Redirect stdout/stderr
 sys.stdout = RedirectText(text_area)
