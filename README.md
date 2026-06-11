@@ -796,6 +796,17 @@ It first checks `otm_description_by_key`, then falls back to dataframe filtering
 
 ### Redis And Circuit Helpers
 
+Redis sources are configured in `credentials.py`:
+
+```python
+redis_sources = [
+    {"name": "primary", "host": "100.103.231.7", "port": 6379, "db": 1},
+    # {"name": "secondary", "host": "SECONDARY_REDIS_IP", "port": 6379, "db": 1},
+]
+```
+
+`fetch_circuit.py` keeps one Redis client per configured source and tracks the currently active source. If the active Redis fails, returns no key, returns bad data, or returns stale data, the next configured Redis source is tried. When another source succeeds, it becomes active for future reads.
+
 `get_redis_ltp_avg(cache_symbol)` reads:
 
 ```text
@@ -808,6 +819,8 @@ from Redis and returns:
 (ltp, avg)
 ```
 
+The LTP payload must contain fresh `payload.Time` and `payload.LTP`; `payload.avg` is optional. If `payload.Time` is more than 5 seconds old, that Redis response is treated as stale and the next Redis source is tried. If all Redis sources fail for LTP, StratX sends price `0` for that leg.
+
 `apply_circuit_clamp(price, description)`:
 
 1. Finds `ExchangeInstrumentID` from the instrument dataframe.
@@ -815,24 +828,21 @@ from Redis and returns:
 3. Uses limits only if Redis timestamp is not older than 300 seconds.
 4. Clamps price to LC/UC when required.
 
+If all Redis sources fail for circuit data, circuit clamping is skipped and the calculated price is left unchanged.
+
 ### `price_from_avg_ltp_or_fallback(...)`
 
 This is the central StratX price calculattion part.
 
 For normal copied orders:
 
-- it reads Redis avg or LTP when available for instrument symbol, else use fallback price from the source trade row,
+- it reads Redis avg or LTP when available for instrument symbol,
+- if Redis LTP is unavailable, stale, invalid, or no Redis symbol is available, price is sent as `0`,
 - it then applies offset for market order,
 - it rounds to tick size,
 - at last clamps to circuit limits.
 
-For retry and OTM pricing:
-
-```python
-for_otm_strike=True
-```
-
-This disables fallback pricing. If Redis LTP is missing, the order is not placed using stale source price.
+Retry and OTM pricing also try the active Redis source first, fail over to another configured source, and send price `0` if all Redis LTP sources fail.
 
 Current live offset behavior:
 
@@ -1194,15 +1204,15 @@ Use this when you want a separate historical/orderbook export outside the live e
 
 `fetch_circuit.py` contains:
 
-### `get_redis_client(...)`
+### `get_redis_client(source)`
 
-Creates a shared Redis client. Current defaults:
+Creates and reuses one Redis client per configured Redis source. Current default source:
 
 ```python
-host="100.103.231.7"
-port=6379
-db=1
+{"name": "primary", "host": "100.103.231.7", "port": 6379, "db": 1}
 ```
+
+The Redis client uses connect/read timeouts of 1 second. Clients are cached and reused; they are not recreated for every read.
 
 ### `get_exchange_instrument_id(description, df)`
 
@@ -1229,6 +1239,8 @@ from Redis and returns:
 ```
 
 Successful responses are cached for 10 seconds.
+
+Circuit data also uses the active Redis failover flow. If all sources fail, `get_circuit_limits()` returns `None`, and StratX continues without circuit clamping.
 
 ## File Watcher
 
@@ -1337,4 +1349,4 @@ Check:
 
 ### StratX OTM or retry price fails
 
-OTM/retry pricing requires Redis LTP data. With `for_otm_strike=True`, the code intentionally avoids fallback to stale source price.
+OTM/retry pricing uses Redis LTP data through the active Redis failover flow. If all configured Redis sources fail or return stale LTP data, the retry/OTM price is sent as `0` instead of using stale source-price fallback.

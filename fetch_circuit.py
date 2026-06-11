@@ -1,35 +1,186 @@
+import datetime
 import json
+import time
 from time import perf_counter
 import redis
 import threading
 import pandas as pd
 import os
 from dotenv import load_dotenv
+import credentials as cre
+from async_logger import printt
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 load_dotenv()
-redis_client = None
+redis_clients = {}
 redis_lock = threading.Lock()
+active_redis_index = 0
 circuit_limits_cache = {}
 CIRCUIT_LIMITS_CACHE_TTL = 10.0
 exchange_instrument_id_cache = {}
 
 
-def get_redis_client(host="100.103.231.7", port=6379, db=1):
-    global redis_client
+def get_redis_sources():
+    try:
+        return getattr(cre, "redis_sources", [
+            {"name": "DESKTOP-CLI5HO6", "host": "100.103.231.7", "port": 6379, "db": 1}
+        ])
+    except Exception as e:
+        printt(f"Error in get_redis_sources: {e}")
+        return [{"name": "DESKTOP-CLI5HO6", "host": "100.103.231.7", "port": 6379, "db": 1}]
 
-    if redis_client is None:
+
+def get_redis_client(source):
+    try:
+        key = (
+            source["host"],
+            int(source.get("port", 6379)),
+            int(source.get("db", 1)),
+        )
+
+        client = redis_clients.get(key)
+        if client is not None:
+            return client
+
         with redis_lock:
-            if redis_client is None:
-                redis_client = redis.Redis(
-                    host=host,
-                    port=port,
-                    db=db,
+            client = redis_clients.get(key)
+            if client is None:
+                client = redis.Redis(
+                    host=source["host"],
+                    port=int(source.get("port", 6379)),
+                    db=int(source.get("db", 1)),
                     decode_responses=True,
-                    max_connections=100
+                    max_connections=100,
+                    socket_connect_timeout=1,
+                    socket_timeout=1,
+                    retry_on_timeout=False,
+                    retry=Retry(NoBackoff(), 0)
                 )
-                redis_client.ping()
+                redis_clients[key] = client
 
-    return redis_client
+        return client
+
+    except Exception as e:
+        printt(f"Error in get_redis_client: {e}")
+        raise
+
+
+def get_redis_order():
+    global active_redis_index
+
+    sources = get_redis_sources()
+
+    if not sources:
+        return sources, []
+
+    if active_redis_index >= len(sources):
+        active_redis_index = 0
+
+    order = [active_redis_index]
+    for i in range(len(sources)):
+        if i != active_redis_index:
+            order.append(i)
+
+    return sources, order
+
+
+def make_redis_active(index, key):
+    global active_redis_index
+
+    try:
+        sources = get_redis_sources()
+
+        with redis_lock:
+            if index != active_redis_index:
+                old_source = sources[active_redis_index].get("name", f"redis_{active_redis_index}")
+                new_source = sources[index].get("name", f"redis_{index}")
+                active_redis_index = index
+                printt(f"REDIS_ACTIVE_SWITCH | key={key} | from={old_source} | to={new_source}")
+
+    except Exception as e:
+        printt(f"Error in make_redis_active: {e}")
+
+
+def parse_redis_time(value):
+    try:
+        value = str(value).strip()
+
+        try:
+            return datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f").timestamp()
+        except Exception:
+            pass
+
+        try:
+            return datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            pass
+
+        return None
+
+    except Exception:
+        return None
+
+
+def get_ltp_avg(cache_symbol):
+    try:
+        key = f"cache:LTP_{str(cache_symbol).strip().upper()}"
+        sources, order = get_redis_order()
+
+        for index in order:
+            source = sources[index]
+            source_name = source.get("name", f"redis_{index}")
+
+            try:
+                client = get_redis_client(source)
+                raw_value = client.get(key)
+
+                if raw_value is None:
+                    printt(f"REDIS_LTP_FAILED | source={source_name} | key={key} | reason=missing_key")
+                    continue
+
+                data = json.loads(raw_value)
+                payload = data.get("payload", {})
+
+                tick_time = payload.get("Time")
+                ltp = payload.get("LTP")
+                avg = payload.get("avg")
+
+                if tick_time is None or ltp is None:
+                    printt(f"REDIS_LTP_FAILED | source={source_name} | key={key} | reason=missing_field")
+                    continue
+
+                tick_timestamp = parse_redis_time(tick_time)
+                if tick_timestamp is None:
+                    printt(f"REDIS_LTP_FAILED | source={source_name} | key={key} | reason=bad_time")
+                    continue
+
+                age = time.time() - tick_timestamp
+                if age > 5:
+                    printt(f"REDIS_LTP_FAILED | source={source_name} | key={key} | reason=stale | age={age:.2f}s")
+                    continue
+
+                result = {
+                    "ltp": float(ltp),
+                    "avg": float(avg) if avg is not None else None,
+                    "time": tick_time,
+                    "source": source_name,
+                }
+
+                if index != active_redis_index:
+                    make_redis_active(index, key)
+
+                return result
+
+            except Exception as e:
+                printt(f"REDIS_LTP_FAILED | source={source_name} | key={key} | error={e}")
+
+        printt(f"REDIS_LTP_ALL_FAILED | key={key}")
+        return None
+
+    except Exception as e:
+        printt(f"Error in get_ltp_avg: {e}")
+        return None
 
 
 def get_exchange_instrument_id(description, df):
@@ -52,7 +203,7 @@ def get_exchange_instrument_id(description, df):
         filtered = df[df['Description'] == description]
         
         if filtered.empty:
-            print(f"No instrument found with description: {description}")
+            printt(f"No instrument found with description: {description}")
             return None
         
         # Return the first ExchangeInstrumentID found
@@ -61,7 +212,7 @@ def get_exchange_instrument_id(description, df):
         return instrument_id
     
     except Exception as e:
-        print(f"Error in get_exchange_instrument_id: {e}")
+        printt(f"Error in get_exchange_instrument_id: {e}")
         return None
 
 def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
@@ -88,28 +239,60 @@ def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
             if now - cached_at <= CIRCUIT_LIMITS_CACHE_TTL:
                 return cached_result
 
-        client = get_redis_client(host=host, port=port, db=db)
-        
         key = f"cache:CIRCUIT_{instrument_id}"
-        raw_value = client.get(key)
-        
-        if raw_value is None:
-            print(f"No circuit data found for instrument ID: {instrument_id}")
-            return None
-        
-        try:
-            data = json.loads(raw_value)
-            result = {
-                'ts': data.get('ts'),
-                'UC': data.get('UC'),
-                'LC': data.get('LC')
-            }
-            circuit_limits_cache[cache_key] = (now, result)
-            return result
-        except json.JSONDecodeError:
-            print(f"Error parsing circuit data for instrument ID: {instrument_id}")
-            return None
+        sources, order = get_redis_order()
+
+        for index in order:
+            source = sources[index]
+            source_name = source.get("name", f"redis_{index}")
+
+            try:
+                raw_value = get_redis_client(source).get(key)
+
+                if raw_value is None:
+                    printt(f"REDIS_CIRCUIT_FAILED | source={source_name} | key={key} | reason=missing_key")
+                    continue
+
+                data = json.loads(raw_value)
+
+                ts = data.get("ts")
+                uc = data.get("UC")
+                lc = data.get("LC")
+
+                if ts is None or uc is None or lc is None:
+                    printt(f"REDIS_CIRCUIT_FAILED | source={source_name} | key={key} | reason=missing_field")
+                    continue
+
+                tick_timestamp = parse_redis_time(ts)
+                if tick_timestamp is None:
+                    printt(f"REDIS_CIRCUIT_FAILED | source={source_name} | key={key} | reason=bad_time")
+                    continue
+
+                age = time.time() - tick_timestamp
+                if age > 300:
+                    printt(f"REDIS_CIRCUIT_FAILED | source={source_name} | key={key} | reason=stale | age={age:.2f}s")
+                    continue
+
+                result = {
+                    "ts": ts,
+                    "UC": float(uc),
+                    "LC": float(lc),
+                    "source": source_name,
+                }
+
+                circuit_limits_cache[cache_key] = (now, result)
+
+                if index != active_redis_index:
+                    make_redis_active(index, key)
+
+                return result
+
+            except Exception as e:
+                printt(f"REDIS_CIRCUIT_FAILED | source={source_name} | key={key} | error={e}")
+
+        printt(f"REDIS_CIRCUIT_ALL_FAILED | key={key}")
+        return None
             
     except Exception as e:
-        print(f"Error in get_circuit_limits: {e}")
+        printt(f"Error in get_circuit_limits: {e}")
         return None

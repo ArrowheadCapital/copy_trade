@@ -12,7 +12,7 @@ import credentials as cre
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_redis_client
+from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_ltp_avg
 from async_logger import createLogFile as async_create_log_file
 from async_logger import printt as async_printt
 
@@ -1101,80 +1101,58 @@ class StratX:
                 if tt0 - cached_at <= StratX.redis_ltp_avg_cache_ttl:
                     return cached_result
 
-            client = get_redis_client()
-            key = f"cache:LTP_{cache_key}"
-            raw_value = client.get(key)
-            if not raw_value:
-                return None, None
+            data = get_ltp_avg(cache_key)
+            if not data:
+                return 0, 0
 
-            data = json.loads(raw_value)
-            payload = data.get("payload", {})
-            ltp = payload.get("LTP")
-            avg = payload.get("avg")
-
-            if ltp is None or avg is None:
-                return None, None
-            tt1 = time.perf_counter()
-            result = (float(ltp), float(avg))
-            StratX.redis_ltp_avg_cache[cache_key] = (tt1, result)
+            result = (data["ltp"], data["avg"])
+            StratX.redis_ltp_avg_cache[cache_key] = (time.perf_counter(), result)
             return result
         except Exception as e:
             printt(f"Redis tick read error ({cache_symbol}): {e}")
-            return None, None
+            return 0, 0
 
 
-    def price_from_avg_ltp_or_fallback(self, side, base_price, tick_size, description, cache_symbol=None, for_otm_strike=False):
+    def price_from_avg_ltp_or_fallback(self, side, tick_size, description, cache_symbol=None):
         try:
-            if for_otm_strike:
-                fallback = None
-            else:
-                fallback = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
-                # return fallback
-                fallback = self.apply_circuit_clamp(fallback, description)
+            if cache_symbol:
+                ltp, avg = self.get_redis_ltp_avg(cache_symbol)
 
-            if not cache_symbol:
-                if fallback is None:
-                    raise ValueError(f"cache_symbol missing while fallback pricing is disabled for: {description}")
-                return fallback
+                if ltp == 0 and avg == 0:
+                    return 0
 
-            ltp, avg = self.get_redis_ltp_avg(cache_symbol)
+                if ltp is not None:
+                    offset_ltp = ltp * (self.market_order_offset / 100)
+                    if ltp <= 50:
+                        offset_ltp = self.market_order_offset
 
-            if ltp is None and fallback is None:
-                raise ValueError(f"LTP missing in redis for {cache_symbol}")
+                    offset_avg = None
+                    if avg is not None:
+                        offset_avg = avg * (self.market_order_offset / 100)
+                        if avg <= 50:
+                            offset_avg = self.market_order_offset
 
-            if ltp is None:
-                return fallback
+                    if avg is None:
+                        if str(side).upper() == "BUY":
+                            raw = ltp + offset_ltp
+                        else:
+                            raw = max(float(tick_size), ltp - offset_ltp)
+                    elif str(side).upper() == "BUY":
+                        raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
+                    else:
+                        raw = (ltp - offset_ltp) if (avg - offset_avg >= ltp) else (avg - offset_avg)
+                        raw = max(float(tick_size), raw)
 
-            offset_ltp = ltp * (self.market_order_offset / 100)
-            if ltp <= 50:
-                offset_ltp = self.market_order_offset
+                    price = round_to_tick(raw, float(tick_size))
+                    if price <= 0:
+                        price = float(tick_size)
+                    price = self.apply_circuit_clamp(price, description)
+                    return price
 
-            offset_avg = None
-            if avg is not None:
-                offset_avg = avg * (self.market_order_offset / 100)
-                if avg <= 50:
-                    offset_avg = self.market_order_offset
-
-            if avg is None:
-                if str(side).upper() == "BUY":
-                    raw = ltp + offset_ltp
-                else:
-                    raw = max(float(tick_size), ltp - offset_ltp)
-            elif str(side).upper() == "BUY":
-                raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
-            else:
-                raw = (ltp - offset_ltp) if (avg - offset_avg >= ltp) else (avg - offset_avg)
-                raw = max(float(tick_size), raw)
-
-            price = round_to_tick(raw, float(tick_size))
-            price = self.apply_circuit_clamp(price, description)
-            return price
+            return 0
         except Exception as e:
             printt(f"Error in price_from_avg_ltp_or_fallback: {e}")
-            if for_otm_strike:
-                raise
-            price = adjust_price_to_tick(float(base_price), float(tick_size), side, self.market_order_offset)
-            return self.apply_circuit_clamp(price, description)
+            return 0
 
 
     def get_otm_strike(self, symbol, right, strike, offset):
@@ -1264,7 +1242,6 @@ class StratX:
             side = str(order_info.get("side", "")).strip().upper()
             expiry = str(order_info.get("expiry", "")).strip()
             strike = order_info.get("strike")
-            base_price = float(order_info.get("price", 0))
 
             if not symbol or not exchange or not right or not side or not expiry:
                 raise ValueError(f"Missing HTTP retry price fields: {order_info}")
@@ -1292,11 +1269,9 @@ class StratX:
 
             new_price = self.price_from_avg_ltp_or_fallback(
                 side=side,
-                base_price=base_price,
                 tick_size=tick_size,
                 description=description,
                 cache_symbol=cache_symbol,
-                for_otm_strike=True,
             )
             order_info["price"] = new_price
             return new_price
@@ -1531,7 +1506,6 @@ class StratX:
             else:
                 strike = float(strike)
 
-            base_price = float(self.get_orderbook_row_value(row, "price", self.get_orderbook_row_value(row, "initiated_price", 0)))
             pricing_symbol = self.get_retry_pricing_symbol(symbol)
             payload_symbol = self.get_retry_payload_symbol(symbol, exchange)
             freez = self.get_retry_freeze_quantity(symbol)
@@ -1556,11 +1530,9 @@ class StratX:
             _t0 = time.perf_counter()
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
-                base_price=base_price,
                 tick_size=tick_size,
                 description=description,
                 cache_symbol=cache_symbol,
-                for_otm_strike=True,
             )
             timing_ctx["price_calc_ms"] = (time.perf_counter() - _t0) * 1000
 
@@ -1871,7 +1843,6 @@ class StratX:
             _t0 = time.perf_counter()
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
-                base_price=price,
                 tick_size=tick_size,
                 description=description,
                 cache_symbol=cache_symbol,
@@ -1914,11 +1885,9 @@ class StratX:
                     _otm_price_t0 = time.perf_counter()
                     otm_price = self.price_from_avg_ltp_or_fallback(
                         side=side,
-                        base_price=None,
                         tick_size=tick_size,
                         description=otm_description,
                         cache_symbol=otm_cache_symbol,
-                        for_otm_strike=True,
                     )
                     if timing_ctx is not None:
                         timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
@@ -1940,11 +1909,9 @@ class StratX:
                 _otm_price_t0 = time.perf_counter()
                 otm_price = self.price_from_avg_ltp_or_fallback(
                     side=side,
-                    base_price=None,
                     tick_size=tick_size,
                     description=otm_description,
                     cache_symbol=otm_cache_symbol,
-                    for_otm_strike=True,
                 )
                 if timing_ctx is not None:
                     timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
@@ -2004,7 +1971,6 @@ class StratX:
             _t0 = time.perf_counter()
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
-                base_price=price,
                 tick_size=tick_size,
                 description=description,
                 cache_symbol=cache_symbol,
@@ -2042,11 +2008,9 @@ class StratX:
                     _otm_price_t0 = time.perf_counter()
                     otm_price = self.price_from_avg_ltp_or_fallback(
                         side=side,
-                        base_price=None,
                         tick_size=tick_size,
                         description=otm_description,
                         cache_symbol=otm_cache_symbol,
-                        for_otm_strike=True,
                     )
                     if timing_ctx is not None:
                         timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
@@ -2068,11 +2032,9 @@ class StratX:
                 _otm_price_t0 = time.perf_counter()
                 otm_price = self.price_from_avg_ltp_or_fallback(
                     side=side,
-                    base_price=None,
                     tick_size=tick_size,
                     description=otm_description,
                     cache_symbol=otm_cache_symbol,
-                    for_otm_strike=True,
                 )
                 if timing_ctx is not None:
                     timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
