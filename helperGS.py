@@ -1873,7 +1873,7 @@ class StratX:
                     "NSEFO", segment, right, freez, csv_read_ts, timing_ctx, description=description
                 ))
 
-                otm_strike = self.get_otm_strike(name, right, strike, offset=2)
+                otm_strike = self.get_otm_strike(name, right, strike, offset=1)
                 if otm_strike is None:
                     printt(f"VOLATILITYCORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
                 else:
@@ -1896,29 +1896,29 @@ class StratX:
                         "NSEFO", "NFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
                     ))
 
-            elif strategy_key == "IMPULSE CORE" and right in ("CE", "PE") and strike is not None:
-                otm_strike = self.get_otm_strike(name, right, strike, offset=1)
-                if otm_strike is None:
-                    raise ValueError(f"IMPULSECORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
+            # elif strategy_key == "IMPULSE CORE" and right in ("CE", "PE") and strike is not None:
+            #     otm_strike = self.get_otm_strike(name, right, strike, offset=1)
+            #     if otm_strike is None:
+            #         raise ValueError(f"IMPULSECORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
 
-                expiry_ddmmmyy = self.to_ddmmmyy(trade[4])
-                otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
-                otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
-                if not otm_description:
-                    raise ValueError(f"IMPULSECORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
-                _otm_price_t0 = time.perf_counter()
-                otm_price = self.price_from_avg_ltp_or_fallback(
-                    side=side,
-                    tick_size=tick_size,
-                    description=otm_description,
-                    cache_symbol=otm_cache_symbol,
-                )
-                if timing_ctx is not None:
-                    timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
-                iids.extend(self.place_stratx_single_order(
-                    url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
-                    "NSEFO", "NFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
-                ))
+            #     expiry_ddmmmyy = self.to_ddmmmyy(trade[4])
+            #     otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
+            #     otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
+            #     if not otm_description:
+            #         raise ValueError(f"IMPULSECORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
+            #     _otm_price_t0 = time.perf_counter()
+            #     otm_price = self.price_from_avg_ltp_or_fallback(
+            #         side=side,
+            #         tick_size=tick_size,
+            #         description=otm_description,
+            #         cache_symbol=otm_cache_symbol,
+            #     )
+            #     if timing_ctx is not None:
+            #         timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
+            #     iids.extend(self.place_stratx_single_order(
+            #         url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
+            #         "NSEFO", "NFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
+            #     ))
 
             else:
                 iids.extend(self.place_stratx_single_order(
@@ -1996,7 +1996,7 @@ class StratX:
                     "BSEFO", segment, right, freez, csv_read_ts, timing_ctx, description=description
                 ))
 
-                otm_strike = self.get_otm_strike(symbol, right, strike, offset=2)
+                otm_strike = self.get_otm_strike(symbol, right, strike, offset=1)
                 if otm_strike is None:
                     printt(f"VOLATILITYCORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
                 else:
@@ -2019,29 +2019,29 @@ class StratX:
                         "BSEFO", "BFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
                     ))
 
-            elif strategy_key == "IMPULSE CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
-                otm_strike = self.get_otm_strike(symbol, right, strike, offset=1)
-                if otm_strike is None:
-                    raise ValueError(f"IMPULSECORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
+            # elif strategy_key == "IMPULSE CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
+            #     otm_strike = self.get_otm_strike(symbol, right, strike, offset=1)
+            #     if otm_strike is None:
+            #         raise ValueError(f"IMPULSECORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
 
-                expiry_ddmmmyy = self.to_ddmmmyy(expiry)
-                otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
-                otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
-                if not otm_description:
-                    raise ValueError(f"IMPULSECORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
-                _otm_price_t0 = time.perf_counter()
-                otm_price = self.price_from_avg_ltp_or_fallback(
-                    side=side,
-                    tick_size=tick_size,
-                    description=otm_description,
-                    cache_symbol=otm_cache_symbol,
-                )
-                if timing_ctx is not None:
-                    timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
-                iids.extend(self.place_stratx_single_order(
-                    url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
-                    "BSEFO", "BFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
-                ))
+            #     expiry_ddmmmyy = self.to_ddmmmyy(expiry)
+            #     otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
+            #     otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
+            #     if not otm_description:
+            #         raise ValueError(f"IMPULSECORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
+            #     _otm_price_t0 = time.perf_counter()
+            #     otm_price = self.price_from_avg_ltp_or_fallback(
+            #         side=side,
+            #         tick_size=tick_size,
+            #         description=otm_description,
+            #         cache_symbol=otm_cache_symbol,
+            #     )
+            #     if timing_ctx is not None:
+            #         timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
+            #     iids.extend(self.place_stratx_single_order(
+            #         url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
+            #         "BSEFO", "BFO-OPT", right, freez, csv_read_ts, timing_ctx, description=otm_description
+            #     ))
 
             else:
                 iids.extend(self.place_stratx_single_order(
