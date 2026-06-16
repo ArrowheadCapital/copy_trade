@@ -64,7 +64,7 @@ csvPathBSE = cre.pathBSE.format(formatted_date=today)
 H.printt("License validation skipped")
 
 # ================= CONFIG =================
-MAX_WORKERS = 10
+MAX_WORKERS = 5
 POLL_INTERVAL = 0.25
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
 
