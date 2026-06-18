@@ -118,9 +118,28 @@ def adjust_price_to_tick(price, tick_size, side, market_order_offset):
 # =========================== GREEKSOFT API ==================================
 
 class greeksoft():
+    greek_order_workers = 5
+    greek_request_timeout = 5
+    greek_retry_state_file = "greek_state.json"
+    greek_retry_state_save_interval = 1
+    max_greek_orderbook_retries = 1
+
     def __init__(self):
         global username
         global pw
+        self.greek_thread_local = threading.local()
+        self.greek_order_pool = ThreadPoolExecutor(
+            max_workers=self.greek_order_workers,
+            thread_name_prefix="greek_order"
+        )
+        self.greek_retry_state_lock = threading.Lock()
+        self.greek_retry_state_dirty = False
+        self.greek_retry_state_loaded = False
+        self.greek_retry_state_saver_started = False
+        self.greek_retry_state = {}
+        self.greek_nse_contract_by_key = {}
+        self.greek_bse_contract_by_token = {}
+        self.greek_contract_by_greek_token = {}
         for i in range(4):
             try:
                 url = f"{authurl}/auth/greek/sessiontoken"
@@ -129,18 +148,533 @@ class greeksoft():
                     "password": pw,
                     "validFor": "10d"
                 }
-                response = requests.post(url, json=data)
+                response = requests.post(url, json=data, timeout=self.greek_request_timeout)
 
                 session_token = response.json().get("sessionToken")
                 self.session_token = session_token
                 printt(f"Session Token Created")
                 self.getInstrument()
                 self.login()
+                if not getattr(self, "gcid", None):
+                    raise RuntimeError("Greeksoft login did not return gcid")
+                self.build_contract_lookup_maps()
+                self.load_retry_state()
+                self.start_retry_state_saver()
+                self.warmup_greek_sessions()
                 printt(f"Master Copy Downloaded..!")
                 break
             except Exception as e:
                 printt(f'Error in generating session token : {e}, retrying...')
                 time.sleep(2)
+
+    def get_greek_session(self):
+        try:
+            session = getattr(self.greek_thread_local, "session", None)
+            if session is None:
+                session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=10,
+                    pool_maxsize=10,
+                    pool_block=False,
+                )
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                self.greek_thread_local.session = session
+            return session
+        except Exception as e:
+            raise RuntimeError(f"Error creating Greeksoft HTTP session: {e}")
+
+    def build_contract_lookup_maps(self):
+        try:
+            if getattr(self, "df", None) is None or self.df.empty:
+                return
+
+            df = self.df.copy()
+            df["symbol_key"] = df["Symbol"].astype(str).str.strip().str.replace(" ", "", regex=False).str.upper()
+            df["expiry_key"] = df["ExpiryDate"].astype(str).str.strip().str.replace(" ", "", regex=False).str.upper()
+            df["strike_key"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
+            df["option_type_key"] = df["OptionType"].astype(str).str.strip().str.replace(" ", "", regex=False).str.upper()
+
+            nse_contract_by_key = {}
+            bse_contract_by_token = {}
+            contract_by_greek_token = {}
+
+            for row in df[[
+                "GreekToken", "ExchangeToken", "Symbol", "LotSize",
+                "symbol_key", "expiry_key", "strike_key", "option_type_key",
+            ]].itertuples(index=False):
+                exchange_token = str(row.ExchangeToken).strip()
+                greek_token = str(row.GreekToken).strip()
+
+                if row.symbol_key and row.expiry_key and row.option_type_key and pd.notna(row.strike_key):
+                    nse_contract_by_key[
+                        (row.symbol_key, row.expiry_key, float(row.strike_key), row.option_type_key)
+                    ] = row
+                if exchange_token:
+                    bse_contract_by_token[exchange_token] = row
+                if greek_token:
+                    contract_by_greek_token[greek_token] = row
+
+            self.greek_nse_contract_by_key = nse_contract_by_key
+            self.greek_bse_contract_by_token = bse_contract_by_token
+            self.greek_contract_by_greek_token = contract_by_greek_token
+
+            printt(f"GREEK_CONTRACT_PRECOMPUTE_DONE | nse={len(self.greek_nse_contract_by_key)} | bse={len(self.greek_bse_contract_by_token)} | greek_tokens={len(self.greek_contract_by_greek_token)}")
+        except Exception as e:
+            printt(f"GREEK_CONTRACT_PRECOMPUTE_FAILED | error={e}")
+
+    def get_retry_state_date(self):
+        return datetime.datetime.now().strftime("%Y%m%d")
+
+    def get_empty_retry_state(self):
+        return {
+            "date": self.get_retry_state_date(),
+            "gorderid_to_root_id": {},
+            "retry_by_root": {},
+        }
+
+    def normalize_retry_state(self, state):
+        try:
+            today = self.get_retry_state_date()
+            if not isinstance(state, dict) or state.get("date") != today:
+                return self.get_empty_retry_state()
+
+            gorderid_to_root_id = state.get("gorderid_to_root_id", {})
+            if not isinstance(gorderid_to_root_id, dict):
+                gorderid_to_root_id = {}
+
+            retry_by_root = {}
+            raw_retry_by_root = state.get("retry_by_root", {})
+            if isinstance(raw_retry_by_root, dict):
+                for root_order_id, root_state in raw_retry_by_root.items():
+                    if not isinstance(root_state, dict):
+                        continue
+                    root_key = str(root_order_id).strip()
+                    if not root_key:
+                        continue
+                    try:
+                        retry_count = int(root_state.get("retry_count", 0))
+                    except Exception:
+                        retry_count = 0
+
+                    processed = root_state.get("processed_gorderids", [])
+                    if isinstance(processed, set):
+                        processed_gorderids = processed
+                    elif isinstance(processed, list):
+                        processed_gorderids = set(str(x).strip() for x in processed if str(x).strip())
+                    else:
+                        processed_gorderids = set()
+
+                    retry_by_root[root_key] = {
+                        "retry_count": retry_count,
+                        "processed_gorderids": processed_gorderids,
+                    }
+
+            return {
+                "date": today,
+                "gorderid_to_root_id": {
+                    str(gorderid).strip(): str(root_id).strip()
+                    for gorderid, root_id in gorderid_to_root_id.items()
+                    if str(gorderid).strip() and str(root_id).strip()
+                },
+                "retry_by_root": retry_by_root,
+            }
+        except Exception as e:
+            printt(f"GREEK_RETRY_STATE_NORMALIZE_FAILED | error={e}")
+            return self.get_empty_retry_state()
+
+    def serialize_retry_state(self):
+        try:
+            with self.greek_retry_state_lock:
+                state = self.greek_retry_state if isinstance(self.greek_retry_state, dict) else self.get_empty_retry_state()
+                retry_by_root = {}
+                for root_order_id, root_state in state.get("retry_by_root", {}).items():
+                    if not isinstance(root_state, dict):
+                        continue
+                    retry_by_root[str(root_order_id)] = {
+                        "retry_count": int(root_state.get("retry_count", 0)),
+                        "processed_gorderids": sorted(list(root_state.get("processed_gorderids", set()))),
+                    }
+                return {
+                    "date": state.get("date", self.get_retry_state_date()),
+                    "gorderid_to_root_id": dict(state.get("gorderid_to_root_id", {})),
+                    "retry_by_root": retry_by_root,
+                }
+        except Exception as e:
+            printt(f"GREEK_RETRY_STATE_SERIALIZE_FAILED | error={e}")
+            return self.get_empty_retry_state()
+
+    def load_retry_state(self):
+        try:
+            state = None
+            if os.path.exists(self.greek_retry_state_file):
+                try:
+                    with open(self.greek_retry_state_file, "r") as state_file:
+                        state = json.load(state_file)
+                except Exception as e:
+                    printt(f"GREEK_RETRY_STATE_LOAD_FAILED | error={e}")
+
+            normalized_state = self.normalize_retry_state(state)
+            state_needs_save = not os.path.exists(self.greek_retry_state_file) or state != normalized_state
+            with self.greek_retry_state_lock:
+                self.greek_retry_state = normalized_state
+                self.greek_retry_state_loaded = True
+                self.greek_retry_state_dirty = state_needs_save
+
+            printt(f"GREEK_RETRY_STATE_LOADED | orders={len(normalized_state['gorderid_to_root_id'])} | roots={len(normalized_state['retry_by_root'])}")
+        except Exception as e:
+            printt(f"Error loading Greeksoft retry state: {e}")
+            with self.greek_retry_state_lock:
+                self.greek_retry_state = self.get_empty_retry_state()
+                self.greek_retry_state_loaded = True
+                self.greek_retry_state_dirty = True
+
+    def save_retry_state_now(self):
+        try:
+            state_snapshot = self.serialize_retry_state()
+            with self.greek_retry_state_lock:
+                self.greek_retry_state_dirty = False
+
+            temp_path = f"{self.greek_retry_state_file}.tmp"
+            with open(temp_path, "w") as state_file:
+                json.dump(state_snapshot, state_file, indent=2)
+            os.replace(temp_path, self.greek_retry_state_file)
+        except Exception as e:
+            with self.greek_retry_state_lock:
+                self.greek_retry_state_dirty = True
+            printt(f"GREEK_RETRY_STATE_SAVE_FAILED | error={e}")
+
+    def retry_state_saver_loop(self):
+        while True:
+            try:
+                time.sleep(self.greek_retry_state_save_interval)
+                with self.greek_retry_state_lock:
+                    should_save = self.greek_retry_state_dirty
+                if should_save:
+                    self.save_retry_state_now()
+            except Exception as e:
+                printt(f"GREEK_RETRY_STATE_SAVER_ERROR | error={e}")
+                time.sleep(1)
+
+    def start_retry_state_saver(self):
+        try:
+            with self.greek_retry_state_lock:
+                if self.greek_retry_state_saver_started:
+                    return
+                self.greek_retry_state_saver_started = True
+
+            saver_thread = threading.Thread(target=self.retry_state_saver_loop, daemon=True)
+            saver_thread.start()
+            atexit.register(self.save_retry_state_now)
+            printt("GREEK_RETRY_STATE_SAVER_STARTED")
+        except Exception as e:
+            printt(f"Error starting Greeksoft retry state saver: {e}")
+
+    def get_retry_root_state(self, root_order_id):
+        root_key = str(root_order_id).strip()
+        retry_by_root = self.greek_retry_state.setdefault("retry_by_root", {})
+        root_state = retry_by_root.setdefault(
+            root_key,
+            {
+                "retry_count": 0,
+                "processed_gorderids": set(),
+            },
+        )
+        if not isinstance(root_state.get("processed_gorderids"), set):
+            root_state["processed_gorderids"] = set(root_state.get("processed_gorderids", []))
+        try:
+            root_state["retry_count"] = int(root_state.get("retry_count", 0))
+        except Exception:
+            root_state["retry_count"] = 0
+        return root_state
+
+    def register_greek_order_id(self, root_order_id, gorderid):
+        try:
+            root_key = str(root_order_id).strip()
+            order_id = str(gorderid).strip()
+            if not root_key or not order_id:
+                return
+
+            with self.greek_retry_state_lock:
+                self.greek_retry_state.setdefault("gorderid_to_root_id", {})[order_id] = root_key
+                self.get_retry_root_state(root_key)
+                self.greek_retry_state_dirty = True
+        except Exception as e:
+            printt(f"GREEK_ORDER_ID_REGISTER_FAILED | root_id={root_order_id} | gorderid={gorderid} | error={e}")
+
+    def mark_retry_enqueued(self, root_order_id, failed_gorderid):
+        try:
+            with self.greek_retry_state_lock:
+                root_state = self.get_retry_root_state(root_order_id)
+                root_state["retry_count"] = int(root_state.get("retry_count", 0)) + 1
+                root_state["processed_gorderids"].add(str(failed_gorderid).strip())
+                self.greek_retry_state_dirty = True
+        except Exception as e:
+            printt(f"GREEK_RETRY_MARK_FAILED | root_id={root_order_id} | gorderid={failed_gorderid} | error={e}")
+
+    def get_greek_freeze_quantity(self, symbol):
+        try:
+            symbol_key = str(symbol).strip().upper()
+            if symbol_key == "NIFTY":
+                return niftyFreeze
+            if symbol_key == "BANKNIFTY":
+                return bnfFreeze
+            if symbol_key == "MIDCPNIFTY":
+                return midcpniftyFreeze
+            if symbol_key == "FINNIFTY":
+                return finniftyFreeze
+            if symbol_key == "BANKEX":
+                return bankex
+            if symbol_key == "SENSEX":
+                return sensexFreeze
+            return None
+        except Exception as e:
+            printt(f"GREEK_FREEZE_LOOKUP_FAILED | symbol={symbol} | error={e}")
+            return None
+
+    def get_lot_size_from_token(self, token):
+        try:
+            row = self.greek_contract_by_greek_token.get(str(token).strip())
+            if row is None:
+                return None
+            return int(float(getattr(row, "LotSize", 0)))
+        except Exception as e:
+            printt(f"GREEK_LOT_SIZE_TOKEN_LOOKUP_FAILED | token={token} | error={e}")
+            return None
+
+    def build_greek_payload(self, task):
+        try:
+            return {
+                "request": {
+                    "data": {
+                        "trigger_price": "0",
+                        "gtoken": str(task["gtoken"]),
+                        "side": str(task["side"]),
+                        "gcid": self.gcid,
+                        "validity": "0",
+                        "price": "0",
+                        "exchange": str(task["exchange"]),
+                        "disclosed_qty": "0",
+                        "tradeSymbol": str(task["tradeSymbol"]).upper(),
+                        "lot": str(task["lot"]),
+                        "order_type": "2",
+                        "product": "0",
+                        "qty": str(task["qty"]),
+                        "corderid": "3",
+                        "amo": "0",
+                        "iprocli": iprocli,
+                        "AccountNumber": AccountNumber,
+                        "gtdExpiry": 0,
+                        "is_post_closed": "0",
+                        "is_preopen_order": "0",
+                        "isSqOffOrder": "false",
+                        "offline": "0",
+                        "is_restapi": "1",
+                        "strategyName": "AlgoSelf"
+                    },
+                    "response_format": "json",
+                    "request_type": "subscribe",
+                    "streaming_type": "NewOrderRequest"
+                }
+            }
+        except Exception as e:
+            raise RuntimeError(f"Error building Greeksoft payload: {e}")
+
+    def submit_greek_order_task(self, task):
+        try:
+            url = f"http://{urll}/NewOrderRequest"
+            headers = {"Authorization": self.session_token}
+            payload = self.build_greek_payload(task)
+            session = self.get_greek_session()
+
+            wait_for_greek_order_slot()
+            response = session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.greek_request_timeout
+            )
+            data = response.json()
+            response_data = data.get("response", {}).get("data", {})
+            svc_name = data.get("response", {}).get("svcName")
+            gscid = response_data.get("gscid")
+            gorderid = response_data.get("gorderid")
+            if not gorderid:
+                raise RuntimeError(f"Greeksoft response missing gorderid: {data}")
+
+            self.register_greek_order_id(task["root_order_id"], gorderid)
+            printt(f"{svc_name} , {gscid} , {gorderid}")
+            printt(f"GREEK_ORDER_SUBMIT_DONE | root_id={task.get('root_order_id')} | source={task.get('source')} | gorderid={gorderid} | exchange={task.get('exchange')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')}")
+            return gorderid
+        except Exception as e:
+            printt(f"GREEK_ORDER_SUBMIT_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | exchange={task.get('exchange')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | error={e}")
+            return None
+
+    def warmup_greek_worker_session(self, worker_index):
+        try:
+            global urll
+            global username
+            session = self.get_greek_session()
+            url = f"http://{urll}/getOrderBookDetailWithLegV2?exchangeType=ALL&ClientCode={self.gcid}&Order_Status=ALL&Ordertype=All&gscid={username}"
+            headers = {"Authorization": self.session_token}
+            start_ts = time.perf_counter()
+            response = session.get(url, headers=headers, timeout=self.greek_request_timeout)
+            elapsed_ms = (time.perf_counter() - start_ts) * 1000
+            printt(f"GREEK_SESSION_WARMUP_DONE | worker={worker_index} | status={response.status_code} | http={elapsed_ms:.1f}ms")
+        except Exception as e:
+            printt(f"GREEK_SESSION_WARMUP_FAILED | worker={worker_index} | error={e}")
+
+    def warmup_greek_sessions(self):
+        try:
+            futures = []
+            for worker_index in range(self.greek_order_workers):
+                futures.append(
+                    self.greek_order_pool.submit(
+                        self.warmup_greek_worker_session,
+                        worker_index
+                    )
+                )
+            for future in futures:
+                future.result()
+            printt(f"GREEK_SESSION_WARMUP_ALL_DONE | workers={self.greek_order_workers}")
+        except Exception as e:
+            printt(f"Error warming Greeksoft sessions: {e}")
+
+    def enqueue_greek_order_task(self, task):
+        try:
+            future = self.greek_order_pool.submit(self.submit_greek_order_task, task)
+            future.add_done_callback(self.log_greek_order_future_result)
+            return True
+        except Exception as e:
+            printt(f"GREEK_ORDER_ENQUEUE_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | error={e}")
+            return False
+
+    def log_greek_order_future_result(self, future):
+        try:
+            future.result()
+        except Exception as e:
+            printt(f"GREEK_ORDER_FUTURE_FAILED | error={e}")
+
+    def create_original_order_task(self, exchange, gtoken, side, trade_symbol, qty, lot_size):
+        try:
+            qty = int(qty)
+            lot_size = int(lot_size)
+            if qty <= 0 or lot_size <= 0:
+                raise ValueError(f"Invalid qty/lot_size: qty={qty}, lot_size={lot_size}")
+            return {
+                "root_order_id": str(uuid.uuid4()),
+                "source": "original",
+                "exchange": str(exchange).upper(),
+                "gtoken": str(gtoken),
+                "side": str(side),
+                "tradeSymbol": str(trade_symbol).upper(),
+                "qty": qty,
+                "lot": qty / lot_size,
+            }
+        except Exception as e:
+            printt(f"GREEK_ORIGINAL_TASK_BUILD_FAILED | exchange={exchange} | sym={trade_symbol} | qty={qty} | error={e}")
+            return None
+
+    def get_orderbook_row_value(self, row, key, default=None):
+        try:
+            if isinstance(row, dict):
+                return row.get(key, default)
+            if hasattr(row, "get"):
+                return row.get(key, default)
+            return default
+        except Exception:
+            return default
+
+    def is_retryable_greek_orderbook_row(self, row):
+        try:
+            status = str(self.get_orderbook_row_value(row, "order_status", "")).strip().upper()
+            if status != "CANCELLED":
+                return False
+            pending_qty = int(float(self.get_orderbook_row_value(row, "pending_qty", 0)))
+            return pending_qty > 0
+        except Exception:
+            return False
+
+    def build_retry_order_task(self, row, root_order_id):
+        try:
+            pending_qty = int(float(self.get_orderbook_row_value(row, "pending_qty", 0)))
+            lot_size = int(float(self.get_orderbook_row_value(row, "regular_lot", 0)))
+            if lot_size <= 0:
+                lot_size = self.get_lot_size_from_token(self.get_orderbook_row_value(row, "token", ""))
+            if pending_qty <= 0 or lot_size <= 0:
+                raise ValueError(f"Invalid retry qty/lot_size: qty={pending_qty}, lot_size={lot_size}")
+
+            symbol = str(self.get_orderbook_row_value(row, "scripName", "")).strip().upper()
+            freeze_limit = self.get_greek_freeze_quantity(symbol)
+            if freeze_limit and pending_qty > int(freeze_limit):
+                printt(f"GREEK_RETRY_QTY_ABOVE_FREEZE | root_id={root_order_id} | gorderid={self.get_orderbook_row_value(row, 'gorderid', '')} | qty={pending_qty} | freeze={freeze_limit}")
+
+            return {
+                "root_order_id": str(root_order_id),
+                "source": "retry",
+                "retry_of_gorderid": str(self.get_orderbook_row_value(row, "gorderid", "")).strip(),
+                "exchange": str(self.get_orderbook_row_value(row, "exchange", "")).strip().upper(),
+                "gtoken": str(self.get_orderbook_row_value(row, "token", "")).strip(),
+                "side": str(self.get_orderbook_row_value(row, "side", "")).strip(),
+                "tradeSymbol": symbol,
+                "qty": pending_qty,
+                "lot": pending_qty / lot_size,
+            }
+        except Exception as e:
+            printt(f"GREEK_RETRY_TASK_BUILD_FAILED | root_id={root_order_id} | gorderid={self.get_orderbook_row_value(row, 'gorderid', '')} | error={e}")
+            return None
+
+    def retry_failed_greeksoft_orders(self, rows):
+        try:
+            if not self.greek_retry_state_loaded:
+                self.load_retry_state()
+            if not isinstance(rows, list):
+                return
+
+            retry_tasks = []
+            for row in rows:
+                try:
+                    if not self.is_retryable_greek_orderbook_row(row):
+                        continue
+
+                    gorderid = str(self.get_orderbook_row_value(row, "gorderid", "")).strip()
+                    if not gorderid:
+                        continue
+
+                    with self.greek_retry_state_lock:
+                        root_order_id = self.greek_retry_state.get("gorderid_to_root_id", {}).get(gorderid)
+                        if not root_order_id:
+                            continue
+
+                        root_state = self.get_retry_root_state(root_order_id)
+                        processed_gorderids = root_state.get("processed_gorderids", set())
+                        if gorderid in processed_gorderids:
+                            continue
+
+                        retry_count = int(root_state.get("retry_count", 0))
+                        if retry_count >= self.max_greek_orderbook_retries:
+                            processed_gorderids.add(gorderid)
+                            self.greek_retry_state_dirty = True
+                            printt(f"GREEK_ORDERBOOK_RETRY_SKIP | reason=max_retries | root_id={root_order_id} | gorderid={gorderid}")
+                            continue
+
+                    task = self.build_retry_order_task(row, root_order_id)
+                    if not task:
+                        continue
+
+                    self.mark_retry_enqueued(root_order_id, gorderid)
+                    retry_tasks.append(task)
+                except Exception as row_error:
+                    printt(f"GREEK_ORDERBOOK_RETRY_ROW_ERROR | gorderid={self.get_orderbook_row_value(row, 'gorderid', '')} | error={row_error}")
+
+            for task in retry_tasks:
+                try:
+                    printt(f"GREEK_ORDERBOOK_RETRY_SUBMIT | root_id={task.get('root_order_id')} | failed_gorderid={task.get('retry_of_gorderid')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')}")
+                    self.enqueue_greek_order_task(task)
+                except Exception as task_error:
+                    printt(f"GREEK_ORDERBOOK_RETRY_ENQUEUE_ERROR | root_id={task.get('root_order_id')} | failed_gorderid={task.get('retry_of_gorderid')} | error={task_error}")
+        except Exception as e:
+            printt(f"Error in retry_failed_greeksoft_orders: {e}")
 
 
     def login(self):
@@ -165,12 +699,12 @@ class greeksoft():
                 }
             }
 
-            response = requests.post(url, json=data, headers=headers)
+            response = requests.post(url, json=data, headers=headers, timeout=self.greek_request_timeout)
             data = response.json()
             self.gcid = str(data['response']['data']['gcid'])
             return(response.json())
         except Exception as e:
-            printt(f"Error in login: {e}, {data}")
+            printt(f"Error in login: {e}")
             return None
 
 
@@ -185,7 +719,7 @@ class greeksoft():
                 "Authorization": authorization_string
             }
             # Make the GET request
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=self.greek_request_timeout)
 
             raw_data = response.text.strip()
 
@@ -205,6 +739,14 @@ class greeksoft():
 
     def getData(self,t):
         try:
+            symbol = str(t[3]).strip().replace(" ", "").upper()
+            expiry = str(t[4]).strip().replace(" ", "").upper()
+            strike = float(t[5])
+            option_type = str(t[6]).strip().replace(" ", "").upper()
+            cached = self.greek_nse_contract_by_key.get((symbol, expiry, strike, option_type))
+            if cached is not None:
+                return cached
+
             d = self.df
             filtered_df = d[d['ExpiryDate'].str.contains(t[4], case=False, na=False)]
             filtered_df = filtered_df[filtered_df['Symbol'] == t[3].replace(' ','')]
@@ -218,6 +760,10 @@ class greeksoft():
 
     def getDataBSE(self,t):
         try:
+            cached = self.greek_bse_contract_by_token.get(str(t).strip())
+            if cached is not None:
+                return cached
+
             filtered_df = self.df
             filtered_df = filtered_df[filtered_df['ExchangeToken'] == int(t)]
             return(filtered_df.iloc[0])
@@ -229,8 +775,6 @@ class greeksoft():
     def placeOrderBSE(self,gtoken,side,name,lot,qua,dt):
         try:
             global multiplier
-            global urll
-            global username
 
             global sensexFreeze
             global bankex
@@ -245,68 +789,13 @@ class greeksoft():
             elif side == 'Sell':
                 si = 2
 
-            url = f"http://{urll}/NewOrderRequest"
-            headers = {
-                "Authorization": self.session_token
-            }
-
             quas = getFreezeQua(freez, dt.LotSize, int(qua * multiplier))
-            lots = [x / int(dt.LotSize) for x in quas]
 
-            idds = []
-
-            for i in range(len(quas)):
-                qua = quas[i]
-                lot = lots[i]
-
-                for i in range(1):
-                    try:
-                        # Request body
-                        data = {
-                            "request": {
-                                "data": {
-                                "trigger_price": "0",
-                                "gtoken": str(gtoken),
-                                "side": str(si),
-                                "gcid": self.gcid,
-                                "validity": "0",
-                                "price": "0",
-                                "exchange": "BSE",
-                                "disclosed_qty": "0",
-                                "tradeSymbol": str(name.upper()),
-                                "lot": str(lot),
-                                "order_type": "2",
-                                "product": "0",
-                                "qty": str(qua),
-                                "corderid": "3",
-                                "amo": "0",
-                                "iprocli": iprocli,
-                                "AccountNumber": AccountNumber,
-                                "gtdExpiry": 0,
-                                "is_post_closed": "0",
-                                "is_preopen_order": "0",
-                                "isSqOffOrder": "false",
-                                "offline": "0",
-                                "is_restapi":"1",
-                                "strategyName": "AlgoSelf"
-                                },
-                                "response_format": "json",
-                                "request_type": "subscribe",
-                                "streaming_type": "NewOrderRequest"
-                            }
-                        }
-
-                        wait_for_greek_order_slot()
-                        response = requests.post(url, json=data, headers=headers)
-                        d = response.json()
-                        printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
-                        idds.append(d['response']['data']['gorderid'])
-                        break
-                    except Exception as e:
-                        printt(d, f"Retrying orderPlacing in 1 Sec | Error: {e}", i)
-                        time.sleep(1)
-
-            return(idds)
+            for split_qty in quas:
+                task = self.create_original_order_task("BSE", gtoken, si, name, split_qty, dt.LotSize)
+                if task:
+                    self.enqueue_greek_order_task(task)
+            return []
         except Exception as e:
             printt(f"Error in placeOrderBSE: {e}")
             return []
@@ -315,8 +804,6 @@ class greeksoft():
     def placeOrder(self,gtoken,side,name,lot,qua,dt):
         try:
             global multiplier
-            global urll
-            global username
 
             global niftyFreeze
             global bnfFreeze
@@ -333,67 +820,12 @@ class greeksoft():
                 freez = finniftyFreeze
 
             quas = getFreezeQua(freez, dt.LotSize, int(qua * multiplier))
-            lots = [x / int(dt.LotSize) for x in quas]
 
-            url = f"http://{urll}/NewOrderRequest"
-            headers = {
-                "Authorization": self.session_token
-            }
-
-            idds = []
-
-            for i in range(len(quas)):
-                qua = quas[i]
-                lot = lots[i]
-
-                for i in range(1):
-                    try:
-                    # Request body
-                        data = {
-                            "request": {
-                                "data": {
-                                "trigger_price": "0",
-                                "gtoken": str(gtoken),
-                                "side": str(side),
-                                "gcid": self.gcid,
-                                "validity": "0",
-                                "price": "0",
-                                "exchange": "NSE",
-                                "disclosed_qty": "0",
-                                "tradeSymbol": str(name.upper()),
-                                "lot": str(lot),
-                                "order_type": "2",
-                                "product": "0",
-                                "qty": str(qua),
-                                "corderid": "3",
-                                "amo": "0",
-                                "iprocli": iprocli,
-                                "AccountNumber": AccountNumber,
-                                "gtdExpiry": 0,
-                                "is_post_closed": "0",
-                                "is_preopen_order": "0",
-                                "isSqOffOrder": "false",
-                                "offline": "0",
-                                "is_restapi":"1",
-                                "strategyName": "AlgoSelf"
-                                },
-                                "response_format": "json",
-                                "request_type": "subscribe",
-                                "streaming_type": "NewOrderRequest"
-                            }
-                        }
-
-                        wait_for_greek_order_slot()
-                        response = requests.post(url, json=data, headers=headers)
-                        d = response.json()
-                        printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
-                        idds.append(d['response']['data']['gorderid'])
-                        break
-                    except Exception as e:
-                        printt(d, f"Retrying orderPlacing in 1 Sec | Error: {e}", i)
-                        time.sleep(1)
-
-            return(idds)
+            for split_qty in quas:
+                task = self.create_original_order_task("NSE", gtoken, side, name, split_qty, dt.LotSize)
+                if task:
+                    self.enqueue_greek_order_task(task)
+            return []
         except Exception as e:
             printt(f"Error in placeOrder: {e}")
             return []
@@ -437,7 +869,7 @@ class greeksoft():
                 }
 
                 try:
-                    response = requests.get(url,headers=headers)
+                    response = requests.get(url, headers=headers, timeout=self.greek_request_timeout)
                     d = response.json()
                     return(d)
                 except Exception as e:

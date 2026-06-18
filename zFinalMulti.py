@@ -160,6 +160,11 @@ def fetch_order_book():
                     brokerObj.retry_failed_orderbook_orders(data)
                 except Exception as retry_error:
                     H.printt(f"StratX orderbook retry processor error: {retry_error}")
+            elif BROKER == "GREEK":
+                try:
+                    brokerObj.retry_failed_greeksoft_orders(data)
+                except Exception as retry_error:
+                    H.printt(f"Greeksoft orderbook retry processor error: {retry_error}")
 
             df = pd.DataFrame(data)
             if df.empty:
