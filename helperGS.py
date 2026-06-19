@@ -12,7 +12,7 @@ import credentials as cre
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_ltp_avg
+from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_ltp_avg, get_underlying_ltp
 from async_logger import createLogFile as async_create_log_file
 from async_logger import printt as async_printt
 
@@ -469,6 +469,8 @@ class StratX:
     instrument_names_to_load = {"NIFTY", "SENSEX"}
     redis_ltp_avg_cache = {}
     redis_ltp_avg_cache_ttl = 0.2
+    redis_underlying_ltp_cache = {}
+    redis_underlying_ltp_cache_ttl = 0.2
     stratx_order_workers = 20
     stratx_request_timeout = 5
     stratx_http_max_attempts = 2
@@ -1420,6 +1422,68 @@ class StratX:
             return "BANKEX"
         return normalized_symbol
 
+    def get_underlying_ltp_for_symbol(self, symbol):
+        try:
+            normalized_symbol = self.get_retry_pricing_symbol(symbol)
+
+            if normalized_symbol in ("NIFTY", "NIFTY 50"):
+                channel = "NIFTY 50"
+            elif normalized_symbol == "SENSEX":
+                channel = "SENSEX"
+            else:
+                return None
+
+            tt0 = time.perf_counter()
+            cached = StratX.redis_underlying_ltp_cache.get(channel)
+            if cached is not None:
+                cached_at, cached_result = cached
+                if tt0 - cached_at <= StratX.redis_underlying_ltp_cache_ttl:
+                    return cached_result
+
+            underlying_ltp = get_underlying_ltp(channel)
+            StratX.redis_underlying_ltp_cache[channel] = (time.perf_counter(), underlying_ltp)
+
+            return underlying_ltp
+        except Exception as e:
+            printt(f"Error in get_underlying_ltp_for_symbol: {e}")
+            return None
+
+    def should_skip_itm_order(self, symbol, right, strike):
+        try:
+            option_type = str(right).strip().upper()
+            if option_type not in ("CE", "PE") or strike is None:
+                return False
+
+            normalized_symbol = self.get_retry_pricing_symbol(symbol)
+            if normalized_symbol not in ("NIFTY", "NIFTY 50", "SENSEX"):
+                return False
+
+            underlying_price = self.get_underlying_ltp_for_symbol(normalized_symbol)
+            if underlying_price is None:
+                printt(f"Skipping ITM check as underlying price not found | symbol={normalized_symbol}")
+                return False
+
+            strike_price = float(strike)
+
+            if option_type == "CE" and strike_price < underlying_price:
+                printt(
+                    f"Skipping Order Placement as strike price is less than underlying price (ITM) "
+                    f"for CE {strike_price} < {underlying_price}"
+                )
+                return True
+
+            if option_type == "PE" and strike_price > underlying_price:
+                printt(
+                    f"Skipping Order Placement as strike price is greater than underlying price (ITM) "
+                    f"for PE {strike_price} > {underlying_price}"
+                )
+                return True
+
+            return False
+        except Exception as e:
+            printt(f"Error in ITM check: {e}")
+            return False
+
     def get_retry_instrument_details(self, symbol, exchange, expiry, right, strike):
         try:
             self.load_instrument_master()
@@ -1674,6 +1738,9 @@ class StratX:
             single_order_entry_ts = time.perf_counter()
             if timing_ctx is not None:
                 timing_ctx["single_order_enter_ts"] = single_order_entry_ts
+
+            if self.should_skip_itm_order(symbol, right, strike):
+                return []
 
             payload_client_ids = [] if client_ids is None else list(client_ids)
 

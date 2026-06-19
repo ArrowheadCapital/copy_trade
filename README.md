@@ -821,6 +821,15 @@ from Redis and returns:
 
 The LTP payload must contain fresh `payload.Time` and `payload.LTP`; `payload.avg` is optional. If `payload.Time` is more than 5 seconds old, that Redis response is treated as stale and the next Redis source is tried. If all Redis sources fail for LTP, StratX sends price `0` for that leg.
 
+`get_underlying_ltp(channel)` reads the latest underlying index tick for the StratX ITM check. It reads Redis keys matching:
+
+```text
+cache:LTP_NIFTY 50
+cache:LTP_SENSEX
+```
+
+It parses `payload.LTP` and uses the value only if `payload.Time` is not older than 10 seconds. Redis source failover works the same way as `get_redis_ltp_avg()`. StratX also keeps a 0.2 second in-memory cache for this underlying ITM lookup.
+
 `apply_circuit_clamp(price, description)`:
 
 1. Finds `ExchangeInstrumentID` from the instrument dataframe.
@@ -852,6 +861,14 @@ Current live offset behavior:
 ### `place_stratx_single_order(...)`
 
 Builds the final StratX JSON payload and submits it asynchronously to the StratX HTTP thread pool.
+
+Before building the payload, StratX checks whether an option order is ITM using the fresh underlying Redis tick:
+
+- NIFTY options use `cache:LTP_NIFTY 50`
+- SENSEX/BSX options use `cache:LTP_SENSEX`
+- CE is skipped when `strike < underlying LTP`
+- PE is skipped when `strike > underlying LTP`
+- if fresh underlying LTP is unavailable from all Redis sources, the ITM check is skipped and the order continues
 
 Important payload fields:
 

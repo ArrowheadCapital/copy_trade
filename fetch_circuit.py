@@ -183,6 +183,59 @@ def get_ltp_avg(cache_symbol):
         return None
 
 
+def get_underlying_ltp(channel):
+    try:
+        normalized_channel = str(channel).strip().upper()
+        key = f"cache:LTP_{normalized_channel}"
+        sources, order = get_redis_order()
+
+        for index in order:
+            source = sources[index]
+            source_name = source.get("name", f"redis_{index}")
+
+            try:
+                client = get_redis_client(source)
+                raw_value = client.get(key)
+                if raw_value is None:
+                    printt(f"REDIS_UNDERLYING_FAILED | source={source_name} | key={key} | reason=missing_key")
+                    continue
+
+                data = json.loads(raw_value)
+                payload = data.get("payload", {})
+
+                tick_time = payload.get("Time")
+                ltp = payload.get("LTP")
+
+                if tick_time is None or ltp is None:
+                    printt(f"REDIS_UNDERLYING_FAILED | source={source_name} | key={key} | reason=missing_field")
+                    continue
+
+                tick_timestamp = parse_redis_time(tick_time)
+                if tick_timestamp is None:
+                    printt(f"REDIS_UNDERLYING_FAILED | source={source_name} | key={key} | reason=bad_time")
+                    continue
+
+                age = time.time() - tick_timestamp
+                if age > 10:
+                    printt(f"REDIS_UNDERLYING_FAILED | source={source_name} | key={key} | reason=stale | age={age:.2f}s")
+                    continue
+
+                if index != active_redis_index:
+                    make_redis_active(index, key)
+
+                return float(ltp)
+
+            except Exception as e:
+                printt(f"REDIS_UNDERLYING_FAILED | source={source_name} | key={key} | error={e}")
+
+        printt(f"REDIS_UNDERLYING_ALL_FAILED | key={key}")
+        return None
+
+    except Exception as e:
+        printt(f"Error in get_underlying_ltp: {e}")
+        return None
+
+
 def get_exchange_instrument_id(description, df):
     """
     Filter options_instruments.csv by description and return ExchangeInstrumentID.
