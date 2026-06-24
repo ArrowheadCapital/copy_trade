@@ -599,9 +599,16 @@ class StratX:
 
     def get_stratx_net_limit(self, bucket):
         try:
-            return int(float(getattr(cre, f"{bucket}_NET", 0)))
+            pos_limit = int(float(getattr(cre, f"{bucket}_POS_NET")))
         except Exception:
-            return 0
+            pos_limit = 0
+
+        try:
+            neg_limit = int(float(getattr(cre, f"{bucket}_NEG_NET")))
+        except Exception:
+            neg_limit = 0
+
+        return max(pos_limit, 0), max(neg_limit, 0)
 
     def get_signed_qty(self, side, qty):
         side_value = str(side).strip().upper()
@@ -727,37 +734,42 @@ class StratX:
                 printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={qty} | reason=non_positive_qty")
                 return False, 0, None
 
-            limit = self.get_stratx_net_limit(bucket)
+            pos_limit, neg_limit = self.get_stratx_net_limit(bucket)
             signed_qty = self.get_signed_qty(side, original_qty)
 
             with StratX.net_lock:
                 current_net = int(StratX.net_position.get(bucket, 0))
                 next_net = current_net + signed_qty
 
-                if abs(next_net) <= limit:
+                if -neg_limit <= next_net <= pos_limit:
                     adjusted_qty = original_qty
                 else:
                     side_value = str(side).strip().upper()
-                    max_allowed_qty = limit - current_net if side_value in ("BUY", "B", "1") else current_net + limit
+
+                    if side_value in ("BUY", "B", "1"):
+                        max_allowed_qty = pos_limit - current_net
+                    else:
+                        max_allowed_qty = current_net + neg_limit
+
                     adjusted_qty = self.floor_to_lot_size(max_allowed_qty, lot_size)
 
                     if adjusted_qty <= 0:
-                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={next_net} | limit={limit} | lot_size={lot_size} | reason=no_valid_partial")
+                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=no_valid_partial")
                         return False, 0, None
 
-                    printt(f"STRATX_NET_PARTIAL_ALLOWED | bucket={bucket} | side={side} | original_qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | requested_next={next_net} | limit={limit} | lot_size={lot_size}")
+                    printt(f"STRATX_NET_PARTIAL_ALLOWED | bucket={bucket} | side={side} | original_qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | requested_next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size}")
 
                 adjusted_signed_qty = self.get_signed_qty(side, adjusted_qty)
                 adjusted_next_net = current_net + adjusted_signed_qty
 
-                if abs(adjusted_next_net) > limit:
-                    printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | next={adjusted_next_net} | limit={limit} | lot_size={lot_size} | reason=partial_still_exceeds")
+                if adjusted_next_net > pos_limit or adjusted_next_net < -neg_limit:
+                    printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | next={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=partial_still_exceeds")
                     return False, 0, None
 
                 StratX.net_position[bucket] = adjusted_next_net
                 self.mark_stratx_net_state_dirty_locked()
 
-            printt(f"STRATX_NET_RESERVED | bucket={bucket} | signed_qty={adjusted_signed_qty} | current={adjusted_next_net} | limit={limit}")
+            printt(f"STRATX_NET_RESERVED | bucket={bucket} | signed_qty={adjusted_signed_qty} | current={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit}")
 
             return True, adjusted_qty, {
                 "bucket": bucket,
