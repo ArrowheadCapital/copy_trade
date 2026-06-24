@@ -11,3 +11,4 @@ __pycache__/
 venv*
 credentials_greek.py
 state.json
+stratx_net_state.json

@@ -17,13 +17,13 @@ This README explains the complete project flow and the important functions in th
 | `helperGS.py`         | Broker layer. Contains Greeksoft and StratX implementations plus shared helpers.                                          |
 | `credentials.py`      | Runtime configuration: broker choice, CSV paths, freeze quantities, API credentials, strategy name, instrument file path. |
 | `file_watcher.py`     | Watchdog-based file watcher that triggers CSV processing immediately when input files change.                             |
-| `async_logger.py`     | Non-blocking logger used by `printt()` and daily log files.                                                             |
+| `async_logger.py`     | Non-blocking logger used by`printt()` and daily log files.                                                              |
 | `fetch_circuit.py`    | Redis helpers for circuit limits and LTP/average data used by StratX pricing.                                             |
-| `fetch_order_book.py` | Standalone utility to download StratX orderbook rows into the `Trades/` folder.                                         |
-| `zzEXE.py`            | Tkinter GUI wrapper with a Start Algo button. Runs `zFinalMulti.py`.                                                    |
-| `run.cmd`             | Windows launcher that activates the virtual environment and starts `zzEXE.py`.                                          |
+| `fetch_order_book.py` | Standalone utility to download StratX orderbook rows into the`Trades/` folder.                                          |
+| `zzEXE.py`            | Tkinter GUI wrapper with a Start Algo button. Runs`zFinalMulti.py`.                                                     |
+| `run.cmd`             | Windows launcher that activates the virtual environment and starts`zzEXE.py`.                                           |
 | `Helper.py`           | Legacy/general helper module used by the runtime for logging and time wait helpers.                                       |
-| `heading.py`          | Small GUI heading text source used by `zzEXE.py`.                                                                       |
+| `heading.py`          | Small GUI heading text source used by`zzEXE.py`.                                                                        |
 | `state.json`          | StratX retry state file created/updated at runtime.                                                                       |
 | `trades.csv`          | Latest orderbook snapshot written by the orderbook polling thread.                                                        |
 
@@ -67,14 +67,16 @@ All runtime configuration lives in `credentials.py`.
 
 The most important settings are:
 
-| Setting                                                                                    | Meaning                                                                                 |
-| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| `broker`                                                                                 | Selects `"STRATX"` or `"GREEK"`.                                                    |
-| `pathNSE` / `pathBSE`                                                                  | Daily source trade-file templates. They must contain `{formatted_date}`.              |
-| `multiplier`                                                                             | Multiplies copied order quantity. Default is `1`.                                     |
-| `niftyFreeze`, `bnfFreeze`, `sensexFreeze`, `bankex`, `midcpnifty`, `finnifty` | Freeze quantity limits used while placing/splitting orders.                             |
-| `optionInstrumentPath`                                                                   | StratX instrument CSV path, loaded from `OPTION_INSTRUMENT_CSV` in `.env`.          |
-| `strategy_name`                                                                          | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value. |
+| Setting                                                                                    | Meaning                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `broker`                                                                                 | Selects`"STRATX"` or `"GREEK"`.                                                                                                                                                 |
+| `pathNSE` / `pathBSE`                                                                  | Daily source trade-file templates. They must contain`{formatted_date}`.                                                                                                           |
+| `multiplier`                                                                             | Multiplies copied order quantity. Default is`1`.                                                                                                                                  |
+| `niftyFreeze`, `bnfFreeze`, `sensexFreeze`, `bankex`, `midcpnifty`, `finnifty` | Freeze quantity limits used while placing/splitting orders.                                                                                                                         |
+| `optionInstrumentPath`                                                                   | StratX instrument CSV path, loaded from`OPTION_INSTRUMENT_CSV` in `.env`.                                                                                                       |
+| `strategy_name`                                                                          | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value.                                                                                             |
+| `NIFTY_CE_NET`, `NIFTY_PE_NET`, `SENSEX_CE_NET`, `SENSEX_PE_NET`                   | StratX max absolute net quantity limits using final StratX order quantity. If full quantity crosses the limit, the order may be reduced to the maximum valid lot-multiple quantity. |
+| `STRATX_NET_CLIENT_ID`                                                                   | Client id used for StratX orderbook rollback, default`Y05601`.                                                                                                                    |
 
 ### Input Files
 
@@ -126,6 +128,67 @@ multiplier = 1
 ```
 
 Both broker paths multiply copied quantity by `multiplier`.
+
+### StratX Net Limit Partial Quantity
+
+StratX net limits are checked per bucket:
+
+```python
+NIFTY_CE_NET
+NIFTY_PE_NET
+SENSEX_CE_NET
+SENSEX_PE_NET
+```
+
+The limit is based on max absolute net quantity.
+
+If the full order fits within the limit, the full order is submitted.
+
+If the full order would cross the limit, the system calculates the maximum valid partial quantity that fits within the limit and floors it to the instrument lot size.
+
+For example:
+
+```text
+Limit = 100
+Current net = 0
+Incoming NIFTY BUY quantity = 130
+NIFTY lot size = 65
+Allowed partial quantity = 65
+Submitted quantity = 65
+```
+
+If no valid lot-multiple quantity fits, the order is skipped.
+
+Example:
+
+```text
+Limit = 100
+Current net = 65
+Incoming NIFTY BUY quantity = 65
+Remaining limit = 35
+NIFTY lot size = 65
+Allowed partial quantity = 0
+Order skipped
+```
+
+Reversal orders are allowed if the final net remains within the limit.
+
+Example:
+
+```text
+Limit = 100
+Current net = +100
+Incoming SELL quantity = 130
+Final net = -30
+Full SELL quantity is allowed
+```
+
+Lot size is read from the instrument data. If lot size is missing, fallback values are used:
+
+```text
+NIFTY = 65
+SENSEX = 20
+```
 
 ### StratX Credentials
 
@@ -200,9 +263,9 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 
 | Column    | Meaning                                                                |
 | --------- | ---------------------------------------------------------------------- |
-| `t[2]`  | Instrument type, for example `OPTIDX` or `FUTIDX`.                 |
+| `t[2]`  | Instrument type, for example`OPTIDX` or `FUTIDX`.                  |
 | `t[3]`  | Symbol.                                                                |
-| `t[4]`  | Expiry string, for example `14FEB2026`.                              |
+| `t[4]`  | Expiry string, for example`14FEB2026`.                               |
 | `t[5]`  | Strike, for options.                                                   |
 | `t[6]`  | Option type,`CE` or `PE`.                                          |
 | `t[7]`  | Description, used by StratX for circuit/instrument lookup.             |
@@ -337,12 +400,20 @@ For StratX, the queue item includes an enqueue timestamp:
 
 That timestamp is used for order timing logs.
 
+For StratX NIFTY CE/PE rows, the final submit path checks the runtime net limit before payload submission. The check uses the final StratX order quantity and reserves quantity under a lock.
+
+If the full order would exceed the configured max absolute net, StratX may reduce the order to the maximum valid lot-multiple quantity that still fits inside the limit. If no valid lot-multiple quantity fits, the order is skipped.
+
 ### `bse_worker()`
 
 Each BSE worker follows the same pattern as the NSE worker, but reads BSE-specific columns and dispatches:
 
 - Greeksoft: `brokerObj.placeOrderBSE(...)`
 - StratX: `brokerObj.placeOrderStratX_BSE(...)`
+
+For StratX SENSEX CE/PE rows, the same runtime net-limit check runs in the final submit path after the BSE contract details, lot size, and final quantity are known.
+
+If the full order would exceed the configured max absolute net, StratX may reduce the order to the maximum valid lot-multiple quantity that still fits inside the limit. If no valid lot-multiple quantity fits, the order is skipped.
 
 ### CSV Processing And Combining
 
@@ -942,17 +1013,17 @@ Places StratX NSE orders.
 
 NSE source columns used:
 
-| Field           | Column                                    |
-| --------------- | ----------------------------------------- |
-| Instrument type | `trade[2]`                              |
-| Symbol          | `trade[3]`                              |
-| Expiry          | `trade[4]`                              |
-| Strike          | `trade[5]`                              |
-| Right           | `trade[6]`                              |
-| Description     | `trade[7]`                              |
-| Side            | worker converts `trade[13]` to BUY/SELL |
-| Quantity        | `trade[14] * multiplier`                |
-| Source price    | `trade[15]`                             |
+| Field           | Column                                   |
+| --------------- | ---------------------------------------- |
+| Instrument type | `trade[2]`                             |
+| Symbol          | `trade[3]`                             |
+| Expiry          | `trade[4]`                             |
+| Strike          | `trade[5]`                             |
+| Right           | `trade[6]`                             |
+| Description     | `trade[7]`                             |
+| Side            | worker converts`trade[13]` to BUY/SELL |
+| Quantity        | `trade[14] * multiplier`               |
+| Source price    | `trade[15]`                            |
 
 Segments:
 
@@ -1059,6 +1130,35 @@ and order_message contains LPP
 
 This avoids retrying every rejection blindly. Margin/RMS/broker rejections should generally not be retried automatically.
 
+### StratX Net Limit
+
+StratX keeps a live max-net guard for these four buckets:
+
+```text
+NIFTY_CE
+NIFTY_PE
+SENSEX_CE
+SENSEX_PE
+```
+
+The configured limits live in `credentials.py`:
+
+```python
+NIFTY_CE_NET = 0
+NIFTY_PE_NET = 0
+SENSEX_CE_NET = 0
+SENSEX_PE_NET = 0
+STRATX_NET_CLIENT_ID = "Y05601"
+```
+
+The check is independent of strike and uses the final quantity passed into `place_stratx_single_order()`, so strategy changes such as `2 * qty` are included. BUY adds quantity and SELL subtracts quantity.
+
+If the full order fits within the configured bucket limit, the full order is submitted. If the full order would exceed the limit, the system may reduce the order to the maximum valid lot-multiple quantity that still fits inside the limit. If no valid lot-multiple quantity fits, the order is skipped before StratX placement.
+
+Reversal orders are allowed when the final net remains within the configured limit. For example, current net `+100` and SELL `130` gives final net `-30`, so the full SELL quantity is allowed.
+
+Runtime net is saved in `stratx_net_state.json` by a background saver, so order placement only updates in-memory net and marks state dirty. This keeps the limit check fast while still allowing an intraday restart to continue from the last saved net. If StratX HTTP placement fails before a reference id is received, the reservation is rolled back. If orderbook later shows a terminal failed row for `STRATX_NET_CLIENT_ID`, the reservation is rolled back once. Retry orders do not add quantity again; they keep the original reservation until the retry succeeds or reaches final failure.
+
 ### Why Retry Is Client-Aware
 
 A normal live StratX broadcast order uses:
@@ -1152,7 +1252,7 @@ On a new day, state resets automatically.
 
 The background saver writes state only when dirty. It writes to `state.json.tmp` and then uses `os.replace()` so the state file is not left half-written.
 
-`zzEXE.py` also calls `save_retry_state_now()` before closing the app.
+`zzEXE.py` also calls `save_stratx_net_state_now()` and `save_retry_state_now()` before closing the app.
 
 ### `retry_failed_orderbook_orders(rows)`
 
@@ -1300,7 +1400,7 @@ Output is redirected into a scrollable text area.
 
 On close:
 
-1. It tries to call `brokerObj.save_retry_state_now()` if the broker object exists and supports it.
+1. It tries to call `brokerObj.save_stratx_net_state_now()` and `brokerObj.save_retry_state_now()` if the broker object exists and supports them.
 2. It destroys the Tkinter root.
 3. It calls `os._exit(0)` to terminate background threads.
 

@@ -6,7 +6,6 @@ import credentials as cre
 import datetime
 import time
 import os
-import json
 import threading
 
 import pandas as pd
@@ -270,9 +269,10 @@ def nse_worker():
                         dt.LotSize
                     )
             else:
+                side_text = 'BUY' if side == 1 else 'SELL'
                 execute_with_retry(
                         brokerObj.placeOrderStratX_NSE,
-                        [symbol, 'BUY' if side==1 else 'SELL', t, csv_read_ts, timing_ctx]
+                        [symbol, side_text, t, csv_read_ts, timing_ctx]
                     )
 
             NSE_QUEUE.task_done()
@@ -335,9 +335,10 @@ def bse_worker():
                         dt.LotSize
                     )
             else:
+                side_text = 'BUY' if side_flag == 'B' else 'SELL'
                 execute_with_retry(
                         brokerObj.placeOrderStratX_BSE,
-                        [symbol, 'BUY' if side_flag=='B' else 'SELL', t, csv_read_ts, timing_ctx]
+                        [symbol, side_text, t, csv_read_ts, timing_ctx]
                     )
 
             BSE_QUEUE.task_done()
@@ -349,6 +350,8 @@ def bse_worker():
 
 # ================= PRE-LOAD STRATX INSTRUMENT MASTER =================
 if BROKER == "STRATX":
+    brokerObj.load_stratx_net_state()
+    brokerObj.start_stratx_net_state_saver()
     brokerObj.load_instrument_master()
     brokerObj.start_retry_state_saver()
     brokerObj.warmup_stratx_sessions()
