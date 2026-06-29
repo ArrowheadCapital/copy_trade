@@ -76,6 +76,7 @@ The most important settings are:
 | `niftyFreeze`,`bnfFreeze`,`sensexFreeze`,`bankex`,`midcpnifty`,`finnifty`                                                                                       | Freeze quantity limits used while placing/splitting orders.                                                                                                                                                                                                                                                              |
 | `optionInstrumentPath`                                                                                                                                                    | StratX instrument CSV path, loaded from`OPTION_INSTRUMENT_CSV`in`.env`.                                                                                                                                                                                                                                              |
 | `strategy_name`                                                                                                                                                           | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value.                                                                                                                                                                                                                                  |
+| StratX Expiry Mode dropdown                                                                                                                                               | StratX Impulse Core offset mode in the GUI. Default `Non Expiry` uses offset `0`; `Expiry` uses offset `1`.                                                                                                                                                                                                            |
 | `NIFTY_CE_POS_NET`,`NIFTY_CE_NEG_NET`,`NIFTY_PE_POS_NET`,`NIFTY_PE_NEG_NET`,`SENSEX_CE_POS_NET`,`SENSEX_CE_NEG_NET`,`SENSEX_PE_POS_NET`,`SENSEX_PE_NEG_NET` | StratX separate positive-side and negative-side net quantity limits using final StratX order quantity. BUY increases net toward the positive limit. SELL decreases net toward the negative limit. If full quantity crosses the relevant side limit, the order may be reduced to the maximum valid lot-multiple quantity. |
 | `STRATX_NET_CLIENT_ID`                                                                                                                                                    | Client id used for StratX orderbook rollback, default`Y05601`.                                                                                                                                                                                                                                                         |
 
@@ -1276,7 +1277,7 @@ Payload-level details:
 Strategy-specific behavior:
 
 * `VOLATILITY CORE`: places main leg and OTM leg with offset 2.
-* `IMPULSE CORE`: places OTM leg with offset 1.
+* `IMPULSE CORE`: places OTM leg with offset from the StratX Expiry Mode dropdown. `Non Expiry` uses offset 0; `Expiry` uses offset 1.
 * Other strategy names: places the original leg.
 
 ### `placeOrderStratX_BSE(...)`
@@ -1325,7 +1326,7 @@ Payload-level details:
 Strategy-specific behavior mirrors NSE for SENSEX options:
 
 * `VOLATILITY CORE`: main leg plus OTM leg with offset 2.
-* `IMPULSE CORE`: OTM leg with offset 1.
+* `IMPULSE CORE`: OTM leg with offset from the StratX Expiry Mode dropdown. `Non Expiry` uses offset 0; `Expiry` uses offset 1.
 * Other strategy names: original leg.
 
 ## StratX Orderbook Retry

@@ -505,6 +505,12 @@ class StratX:
     }
     net_released_roots = set()
 
+    def __init__(self):
+        mode = str(os.getenv("STRATX_EXPIRY_MODE", "NON_EXPIRY")).strip().upper()
+        self.stratx_expiry_mode = mode.replace("-", "_").replace(" ", "_")
+        self.impulse_offset = 1 if self.stratx_expiry_mode == "EXPIRY" else 0
+        printt(f"STRATX_EXPIRY_MODE | mode={self.stratx_expiry_mode} | impulse_offset={self.impulse_offset}")
+
     def get_stratx_session(self):
         try:
             session = getattr(StratX.stratx_thread_local, "session", None)
@@ -2384,7 +2390,7 @@ class StratX:
                 #     ))
 
             elif strategy_key == "IMPULSE CORE" and right in ("CE", "PE") and strike is not None:
-                otm_strike = self.get_otm_strike(name, right, strike, offset=1)
+                otm_strike = self.get_otm_strike(name, right, strike, offset=self.impulse_offset)
                 if otm_strike is None:
                     raise ValueError(f"IMPULSECORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
 
@@ -2516,7 +2522,7 @@ class StratX:
                 #     ))
 
             elif strategy_key == "IMPULSE CORE" and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
-                otm_strike = self.get_otm_strike(symbol, right, strike, offset=1)
+                otm_strike = self.get_otm_strike(symbol, right, strike, offset=self.impulse_offset)
                 if otm_strike is None:
                     raise ValueError(f"IMPULSECORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
 

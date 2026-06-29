@@ -40,6 +40,10 @@ def exec_script(script_name, on_complete):
 
 def run_algo():
     algo_button.config(state='disabled')
+    if cre.broker.upper() == "STRATX":
+        selected_mode = stratx_expiry_var.get().strip().upper().replace(" ", "_")
+        os.environ["STRATX_EXPIRY_MODE"] = selected_mode
+        print(f"[INFO] StratX expiry mode: {stratx_expiry_var.get()}")
     thread = threading.Thread(target=exec_script, args=('zFinalMulti.py', on_algo_complete))
     thread.start()
 
@@ -151,11 +155,27 @@ text_area.configure(height=20)
 button_frame = ttk.Frame(logs_card)
 button_frame.grid(row=1, column=0, pady=10)
 
+stratx_expiry_var = tk.StringVar(value="Non Expiry")
+action_column = 0
+if cre.broker.upper() == "STRATX":
+    expiry_label = ttk.Label(button_frame, text="Expiry Mode")
+    expiry_label.grid(row=0, column=0, padx=(4, 2), pady=4)
+
+    expiry_dropdown = ttk.Combobox(
+        button_frame,
+        textvariable=stratx_expiry_var,
+        values=("Non Expiry", "Expiry"),
+        state="readonly",
+        width=12
+    )
+    expiry_dropdown.grid(row=0, column=1, padx=(2, 8), pady=4)
+    action_column = 2
+
 algo_button = ttk.Button(button_frame, text="Start Algo", command=run_algo, style="Start.TButton")
-algo_button.grid(row=0, column=0, padx=4, pady=4)
+algo_button.grid(row=0, column=action_column, padx=4, pady=4)
 
 pause_button = ttk.Button(button_frame, text="Pause", command=toggle_pause, style="Start.TButton")
-pause_button.grid(row=0, column=1, padx=4, pady=4)
+pause_button.grid(row=0, column=action_column + 1, padx=4, pady=4)
 
 # Redirect stdout/stderr
 sys.stdout = RedirectText(text_area)
