@@ -638,6 +638,138 @@ class StratX:
             printt(f"Error in floor_to_lot_size: {e}")
             return 0
 
+    def get_stratx_traded_quantity(self, row):
+        try:
+            value = self.get_orderbook_row_value(row, "quantity", None)
+            if value is None:
+                return 0
+            qty = int(float(value))
+            return qty if qty > 0 else 0
+        except Exception as e:
+            printt(f"STRATX_NET_SYNC_QTY_PARSE_FAILED | error={e} | row={row}")
+            return 0
+
+    def fetch_stratx_traded_orders(self):
+        try:
+            page_size = 5000
+            page_number = 1
+            max_pages = 100
+            all_data = []
+
+            payload = json.dumps({
+                "id": cre.id,
+                "secret_key": cre.secret_key,
+                "status": ["TRADED"]
+            })
+            headers = {"Content-Type": "application/json"}
+
+            while page_number <= max_pages:
+                url = f"https://{cre.stratX_url}/api/v1/reports/order/fields/?page_size={page_size}&page_number={page_number}"
+                response = requests.request("POST", url, headers=headers, data=payload, timeout=StratX.stratx_request_timeout)
+                page_response = response.json()
+
+                if not isinstance(page_response, dict):
+                    printt("STRATX_NET_SYNC_FETCH_FAILED | reason=invalid_response_type")
+                    return None
+
+                page_data = page_response.get("data")
+                if not isinstance(page_data, list):
+                    printt("STRATX_NET_SYNC_FETCH_FAILED | reason=missing_data_list")
+                    return None
+
+                all_data.extend(page_data)
+                if len(page_data) != page_size:
+                    return all_data
+
+                page_number += 1
+
+            return all_data
+        except Exception as e:
+            printt(f"STRATX_NET_SYNC_FETCH_FAILED | error={e}")
+            return None
+
+    def build_stratx_net_from_traded_orders(self, rows):
+        net_position = {bucket: 0 for bucket in StratX.net_buckets}
+        net_client_id = str(getattr(cre, "STRATX_NET_CLIENT_ID", "Y05601")).strip().upper()
+        seen_rows = set()
+        counted = 0
+
+        if not net_client_id:
+            printt("STRATX_NET_SYNC_SKIPPED | reason=missing_client_id")
+            return None, 0
+
+        for row in rows:
+            try:
+                status = str(self.get_orderbook_row_value(row, "status", "")).strip().upper()
+                if status and status != "TRADED":
+                    continue
+
+                client_id = str(self.get_orderbook_row_value(row, "client_id", "")).strip().upper()
+                if client_id != net_client_id:
+                    continue
+
+                symbol = self.get_retry_pricing_symbol(self.get_orderbook_row_value(row, "symbol", ""))
+                right = str(self.get_orderbook_row_value(row, "right", "")).strip().upper()
+                bucket = self.get_stratx_net_bucket(symbol, right)
+                if not bucket:
+                    continue
+
+                qty = self.get_stratx_traded_quantity(row)
+                if qty <= 0:
+                    continue
+
+                side = str(self.get_orderbook_row_value(row, "buyorsell", "")).strip().upper()
+                row_id = self.get_orderbook_row_value(row, "id", None)
+                unique_key = row_id if row_id not in (None, "") else (
+                    self.get_orderbook_row_value(row, "reference_id", ""),
+                    client_id,
+                    bucket,
+                    side,
+                    qty,
+                )
+                unique_key = str(unique_key)
+                if unique_key in seen_rows:
+                    continue
+                seen_rows.add(unique_key)
+
+                net_position[bucket] += self.get_signed_qty(side, qty)
+                counted += 1
+            except Exception as e:
+                printt(f"STRATX_NET_SYNC_ROW_SKIPPED | error={e} | row={row}")
+
+        return net_position, counted
+
+    def log_stratx_net_over_limit(self, net_position, source):
+        for bucket, current_net in net_position.items():
+            pos_limit, neg_limit = self.get_stratx_net_limit(bucket)
+            if current_net > pos_limit or current_net < -neg_limit:
+                printt(f"STRATX_NET_SYNC_OVER_LIMIT | source={source} | bucket={bucket} | net={current_net} | pos_limit={pos_limit} | neg_limit={neg_limit}")
+
+    def sync_stratx_net_from_traded_orders(self, source="manual"):
+        try:
+            with StratX.net_lock:
+                rows = self.fetch_stratx_traded_orders()
+                if rows is None:
+                    return False
+
+                net_position, counted = self.build_stratx_net_from_traded_orders(rows)
+                if net_position is None:
+                    return False
+
+                for bucket in StratX.net_buckets:
+                    StratX.net_position[bucket] = int(net_position.get(bucket, 0))
+                StratX.net_released_roots.clear()
+                self.mark_stratx_net_state_dirty_locked()
+                synced_net = dict(StratX.net_position)
+
+            self.log_stratx_net_over_limit(synced_net, source)
+            self.save_stratx_net_state_now()
+            printt(f"STRATX_NET_SYNC_DONE | source={source} | net={synced_net}")
+            return True
+        except Exception as e:
+            printt(f"STRATX_NET_SYNC_FAILED | source={source} | error={e}")
+            return False
+
     def load_stratx_net_state(self):
         try:
             today_key = self.get_retry_state_date()
@@ -747,7 +879,27 @@ class StratX:
                 current_net = int(StratX.net_position.get(bucket, 0))
                 next_net = current_net + signed_qty
 
-                if -neg_limit <= next_net <= pos_limit:
+                if current_net > pos_limit:
+                    if signed_qty >= 0:
+                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=over_positive_increase")
+                        return False, 0, None
+                    adjusted_qty = min(original_qty, self.floor_to_lot_size(current_net + neg_limit, lot_size))
+                    if adjusted_qty <= 0:
+                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=no_valid_reduce")
+                        return False, 0, None
+                    if adjusted_qty != original_qty:
+                        printt(f"STRATX_NET_PARTIAL_ALLOWED | bucket={bucket} | side={side} | original_qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | requested_next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=over_positive_reduce")
+                elif current_net < -neg_limit:
+                    if signed_qty <= 0:
+                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=over_negative_increase")
+                        return False, 0, None
+                    adjusted_qty = min(original_qty, self.floor_to_lot_size(pos_limit - current_net, lot_size))
+                    if adjusted_qty <= 0:
+                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=no_valid_reduce")
+                        return False, 0, None
+                    if adjusted_qty != original_qty:
+                        printt(f"STRATX_NET_PARTIAL_ALLOWED | bucket={bucket} | side={side} | original_qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | requested_next={next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=over_negative_reduce")
+                elif -neg_limit <= next_net <= pos_limit:
                     adjusted_qty = original_qty
                 else:
                     side_value = str(side).strip().upper()
@@ -769,8 +921,13 @@ class StratX:
                 adjusted_next_net = current_net + adjusted_signed_qty
 
                 if adjusted_next_net > pos_limit or adjusted_next_net < -neg_limit:
-                    printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | next={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=partial_still_exceeds")
-                    return False, 0, None
+                    if current_net > pos_limit and adjusted_next_net < current_net:
+                        pass
+                    elif current_net < -neg_limit and adjusted_next_net > current_net:
+                        pass
+                    else:
+                        printt(f"STRATX_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | next={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=partial_still_exceeds")
+                        return False, 0, None
 
                 StratX.net_position[bucket] = adjusted_next_net
                 self.mark_stratx_net_state_dirty_locked()

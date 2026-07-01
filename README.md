@@ -446,6 +446,8 @@ For StratX NIFTY CE/PE rows, the final submit path checks the runtime net limit 
 
 If the full order would exceed the configured positive/negative net range, StratX may reduce the order to the maximum valid lot-multiple quantity that still fits inside the relevant side limit. If no valid lot-multiple quantity fits, the order is skipped.
 
+If synced broker net is already outside the configured range, orders that increase exposure are skipped, but orders that move net back toward the limit are allowed.
+
 ### `bse_worker()`
 
 Each BSE worker follows the same pattern as the NSE worker, but reads BSE-specific columns and dispatches:
@@ -456,6 +458,8 @@ Each BSE worker follows the same pattern as the NSE worker, but reads BSE-specif
 For StratX SENSEX CE/PE rows, the same runtime net-limit check runs in the final submit path after the BSE contract details, lot size, and final quantity are known.
 
 If the full order would exceed the configured positive/negative net range, StratX may reduce the order to the maximum valid lot-multiple quantity that still fits inside the relevant side limit. If no valid lot-multiple quantity fits, the order is skipped.
+
+The same reduce-only behavior applies when synced broker net is already outside the configured range.
 
 ### CSV Processing And Combining
 
@@ -1053,6 +1057,8 @@ Rules:
 * If full order crosses the relevant side limit, the function calculates the maximum allowed quantity.
 * Allowed partial quantity is floored to the instrument lot size.
 * If the floored partial quantity is `0`, the order is skipped.
+* If current net is already above `POS_NET`, BUY is skipped and SELL is allowed only because it reduces exposure.
+* If current net is already below `-NEG_NET`, SELL is skipped and BUY is allowed only because it reduces exposure.
 * The reservation is protected by `net_lock`, so concurrent workers cannot cross the configured net range.
 * After reservation, `stratx_net_state.json` is marked dirty and saved by the background saver.
 
@@ -1087,6 +1093,16 @@ Current net = +65
 Incoming SELL quantity = 195
 Final net = -130
 Full SELL quantity is allowed
+```
+
+Example synced over-limit reduction:
+
+```text
+NIFTY_CE_POS_NET = 130
+Current broker net = +260
+Incoming SELL quantity = 65
+Final net = +195
+SELL is allowed because it reduces exposure
 ```
 
 Sensex example:
@@ -1405,7 +1421,9 @@ If the full order fits within the configured positive/negative range, the full o
 
 Reversal orders are allowed when the final net remains within the configured positive/negative range. For example, with `NIFTY_CE_POS_NET = 65` and `NIFTY_CE_NEG_NET = 130`, current net `+65` and SELL `195` gives final net `-130`, so the full SELL quantity is allowed.
 
-Runtime net is saved in `stratx_net_state.json` by a background saver, so order placement only updates in-memory net and marks state dirty. This keeps the limit check fast while still allowing an intraday restart to continue from the last saved net. If StratX HTTP placement fails before a reference id is received, the reservation is rolled back. If orderbook later shows a terminal failed row for `STRATX_NET_CLIENT_ID`, the reservation is released once. Retry orders do not add quantity again; they keep the original reservation until the retry succeeds or reaches final failure.
+On startup, StratX fetches `TRADED` rows for `STRATX_NET_CLIENT_ID`, rebuilds `NIFTY_CE`, `NIFTY_PE`, `SENSEX_CE`, and `SENSEX_PE`, and replaces runtime net with the broker-calculated value. The GUI `Sync Net` button runs the same sync under `net_lock`.
+
+Runtime net is saved in `stratx_net_state.json` by a background saver, so order placement only updates in-memory net and marks state dirty. This keeps the limit check fast while still allowing an intraday restart to continue from the last saved net if broker sync fails. If StratX HTTP placement fails before a reference id is received, the reservation is rolled back. If orderbook later shows a terminal failed row for `STRATX_NET_CLIENT_ID`, the reservation is released once. Retry orders do not add quantity again; they keep the original reservation until the retry succeeds or reaches final failure.
 
 ### Why Retry Is Client-Aware
 

@@ -353,6 +353,7 @@ if BROKER == "STRATX":
     brokerObj.load_stratx_net_state()
     brokerObj.start_stratx_net_state_saver()
     brokerObj.load_instrument_master()
+    brokerObj.sync_stratx_net_from_traded_orders(source="startup")
     brokerObj.start_retry_state_saver()
     brokerObj.warmup_stratx_sessions()
 

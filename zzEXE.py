@@ -60,6 +60,27 @@ def toggle_pause():
         pause_button.config(text="Resume")
         print("[INFO] Copy trade paused")
 
+def sync_stratx_net():
+    broker_object = globals().get("brokerObj")
+    if broker_object is None or not hasattr(broker_object, "sync_stratx_net_from_traded_orders"):
+        print("[WARN] Start algo before syncing StratX net")
+        return
+
+    def sync_worker():
+        try:
+            root.after(0, lambda: sync_button.config(state='disabled'))
+            ok = broker_object.sync_stratx_net_from_traded_orders(source="manual")
+            if ok:
+                print("[INFO] StratX net sync completed")
+            else:
+                print("[WARN] StratX net sync failed")
+        except Exception as e:
+            print(f"[WARN] StratX net sync error: {e}")
+        finally:
+            root.after(0, lambda: sync_button.config(state='normal'))
+
+    threading.Thread(target=sync_worker, daemon=True).start()
+
 def on_close():
     try:
         broker_object = globals().get("brokerObj")
@@ -176,6 +197,10 @@ algo_button.grid(row=0, column=action_column, padx=4, pady=4)
 
 pause_button = ttk.Button(button_frame, text="Pause", command=toggle_pause, style="Start.TButton")
 pause_button.grid(row=0, column=action_column + 1, padx=4, pady=4)
+
+if cre.broker.upper() == "STRATX":
+    sync_button = ttk.Button(button_frame, text="Sync Net", command=sync_stratx_net, style="Start.TButton")
+    sync_button.grid(row=0, column=action_column + 2, padx=4, pady=4)
 
 # Redirect stdout/stderr
 sys.stdout = RedirectText(text_area)
