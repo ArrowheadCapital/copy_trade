@@ -938,9 +938,13 @@ class StratX:
 
                 # Precompute normalized lookup columns once for fast repeated filters
                 df["underlying_index_name_normalized"] = df["UnderlyingIndexName"].astype(str).str.strip().str.upper()
-                df["contract_expiration_yyyymmdd"] = pd.to_datetime(
-                    df["ContractExpiration"], errors="coerce"
-                ).dt.strftime("%Y%m%d")
+                df["contract_expiration_yyyymmdd"] = (
+                    pd.to_datetime(df["ContractExpiration"], format="%d%b%Y")
+                    .dt.strftime("%Y%m%d")
+                )
+                # df["contract_expiration_yyyymmdd"] = pd.to_datetime(
+                #     df["ContractExpiration"], errors="coerce"
+                # ).dt.strftime("%Y%m%d")
                 df["strike_price_numeric"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
                 df["option_type_normalized"] = df["OptionType"].astype(str).str.strip().str.upper()
 
@@ -1000,24 +1004,17 @@ class StratX:
                 printt(f"Error loading instrument master: {e}")
 
 
-    def get_bse_contract_details(self, exchange_instrument_id, description):
+    def get_bse_contract_details(self, description):
         try:
             self.load_instrument_master()
-            exchange_instrument_id = str(exchange_instrument_id).strip()
             description = str(description).strip()
-            cached = StratX.bse_contract_by_id_desc.get((exchange_instrument_id, description))
-            if cached is not None:
-                return cached
 
             df = StratX.inst_df
 
-            row = df[
-                (df["ExchangeInstrumentID"] == exchange_instrument_id) &
-                (df["Description"] == description)
-            ]
+            row = df[df["Description"] == description]
 
             if row.empty:
-                raise ValueError(f"BSE Instrument not found: {exchange_instrument_id} | {description}")
+                raise ValueError(f"BSE Instrument not found: {description}")
 
             row = row.iloc[0]
             expiry = pd.to_datetime(row["ContractExpiration"]).strftime("%Y%m%d")
@@ -2010,12 +2007,9 @@ class StratX:
 
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
-            exchange_instrument_id = str(trade[4]).strip()
             description = str(trade[5]).strip()
 
-            symbol, strike, expiry, right, tick_size = self.get_bse_contract_details(
-                exchange_instrument_id, description
-            )
+            symbol, strike, expiry, right, tick_size = self.get_bse_contract_details(description)
 
             if not symbol:
                 return []
