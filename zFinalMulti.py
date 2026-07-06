@@ -192,7 +192,7 @@ def fetch_order_book():
             H.printt(f"OrderBook Error: {e}")
             time.sleep(1)
 
-# threading.Thread(target=fetch_order_book, daemon=True).start()
+threading.Thread(target=fetch_order_book, daemon=True).start()
 
 # ================= QUEUES =================
 NSE_QUEUE = Queue(maxsize=4000)
@@ -376,7 +376,7 @@ if BROKER == "STRATX":
     brokerObj.load_instrument_master()
     brokerObj.sync_stratx_net_from_traded_orders(source="startup")
     brokerObj.start_retry_state_saver()
-    # brokerObj.warmup_stratx_sessions()
+    brokerObj.warmup_stratx_sessions()
 
 # ================= START 40 WORKERS =================
 NSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)

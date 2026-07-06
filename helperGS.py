@@ -1760,12 +1760,12 @@ class StratX:
 
             for attempt in range(1, StratX.stratx_http_max_attempts + 1):
                 attempt_start_ts = time.perf_counter()
-                # response = session.post(
-                #     url,
-                #     headers=headers,
-                #     data=current_payload,
-                #     timeout=StratX.stratx_request_timeout
-                # )
+                response = session.post(
+                    url,
+                    headers=headers,
+                    data=current_payload,
+                    timeout=StratX.stratx_request_timeout
+                )
 
                 request_end_ts = time.perf_counter()
                 http_ms = (request_end_ts - attempt_start_ts) * 1000
