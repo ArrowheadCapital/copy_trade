@@ -461,7 +461,7 @@ class StratX:
     market_order_offset = 8
     tick_size_by_name = {}
     lot_size_by_name = {}
-    bse_contract_by_id_desc = {}
+    bse_contract_by_desc = {}
     otm_description_by_key = {}
     retry_instrument_by_key = {}
     expiry_yyyymmdd_cache = {}
@@ -1387,9 +1387,13 @@ class StratX:
 
                 # Precompute normalized lookup columns once for fast repeated filters
                 df["underlying_index_name_normalized"] = df["UnderlyingIndexName"].astype(str).str.strip().str.upper()
-                df["contract_expiration_yyyymmdd"] = pd.to_datetime(
-                    df["ContractExpiration"], errors="coerce"
-                ).dt.strftime("%Y%m%d")
+                df["contract_expiration_yyyymmdd"] = (
+                    pd.to_datetime(df["ContractExpiration"], format="%d%b%Y")
+                    .dt.strftime("%Y%m%d")
+                )
+                # df["contract_expiration_yyyymmdd"] = pd.to_datetime(
+                #     df["ContractExpiration"], errors="coerce"
+                # ).dt.strftime("%Y%m%d")
                 df["strike_price_numeric"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
                 df["option_type_normalized"] = df["OptionType"].astype(str).str.strip().str.upper()
 
@@ -1403,7 +1407,7 @@ class StratX:
                     if row_name and pd.notna(lot_size) and row_name not in lot_size_by_name:
                         lot_size_by_name[row_name] = int(float(lot_size))
 
-                bse_contract_by_id_desc = {}
+                bse_contract_by_desc = {}
                 otm_description_by_key = {}
                 retry_instrument_by_key = {}
                 for row in df[[
@@ -1436,7 +1440,7 @@ class StratX:
                     tick = float(tick_size) if pd.notna(tick_size) else None
                     lot = int(float(lot_size)) if pd.notna(lot_size) else None
                     if tick is not None and expiry and expiry.lower() != "nan":
-                        bse_contract_by_id_desc[(str(exchange_instrument_id).strip(), desc)] = (
+                        bse_contract_by_desc[desc] = (
                             symbol, strike, expiry, right, tick, lot
                         )
                         retry_key = (exchange_segment, name_symbol, expiry, right, strike)
@@ -1447,7 +1451,7 @@ class StratX:
 
                 StratX.tick_size_by_name = tick_size_by_name
                 StratX.lot_size_by_name = lot_size_by_name
-                StratX.bse_contract_by_id_desc = bse_contract_by_id_desc
+                StratX.bse_contract_by_desc = bse_contract_by_desc
                 StratX.otm_description_by_key = otm_description_by_key
                 StratX.retry_instrument_by_key = retry_instrument_by_key
                 StratX.inst_df = df
@@ -1456,24 +1460,20 @@ class StratX:
                 printt(f"Error loading instrument master: {e}")
 
 
-    def get_bse_contract_details(self, exchange_instrument_id, description):
+    def get_bse_contract_details(self, description):
         try:
             self.load_instrument_master()
-            exchange_instrument_id = str(exchange_instrument_id).strip()
             description = str(description).strip()
-            cached = StratX.bse_contract_by_id_desc.get((exchange_instrument_id, description))
+            cached = StratX.bse_contract_by_desc.get(description)
             if cached is not None:
                 return cached
 
             df = StratX.inst_df
 
-            row = df[
-                (df["ExchangeInstrumentID"] == exchange_instrument_id) &
-                (df["Description"] == description)
-            ]
+            row = df[df["Description"] == description]
 
             if row.empty:
-                raise ValueError(f"BSE Instrument not found: {exchange_instrument_id} | {description}")
+                raise ValueError(f"BSE Instrument not found: {description}")
 
             row = row.iloc[0]
             expiry = pd.to_datetime(row["ContractExpiration"]).strftime("%Y%m%d")
@@ -2592,12 +2592,9 @@ class StratX:
 
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
-            exchange_instrument_id = str(trade[4]).strip()
             description = str(trade[5]).strip()
 
-            symbol, strike, expiry, right, tick_size, lot_size = self.get_bse_contract_details(
-                exchange_instrument_id, description
-            )
+            symbol, strike, expiry, right, tick_size, lot_size = self.get_bse_contract_details(description)
 
             if not symbol:
                 return []
