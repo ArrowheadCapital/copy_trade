@@ -66,6 +66,8 @@ H.printt("License validation skipped")
 MAX_WORKERS = 5
 POLL_INTERVAL = 0.25
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
+COPY_SOURCE_ID = str(getattr(cre, "copy_source_id", "")).strip().upper()
+COPY_ALLOWED_DELAY_SECONDS = float(os.getenv("COPY_ALLOWED_DELAY_SECONDS", "0") or 0)
 
 # Risk limits (commented out for now, can enable later)
 # MAX_POSITION_VALUE = 5000000
@@ -106,6 +108,25 @@ def validate_trade(symbol, qty, strike=None, max_qty=50000):
         #     return False
         return True
     except:
+        return False
+
+
+def is_copy_row_allowed(row_id, row_dt, source):
+    try:
+        actual_id = str(row_id).strip().upper()
+        if COPY_SOURCE_ID and actual_id != COPY_SOURCE_ID:
+            H.printt(f"{source} skip source id | expected={COPY_SOURCE_ID} | actual={actual_id}")
+            return False
+
+        diff = abs((datetime.datetime.now() - row_dt).total_seconds())
+        if diff > COPY_ALLOWED_DELAY_SECONDS:
+            H.printt(f"{source} skip delay | diff={diff:.2f}s | allowed={COPY_ALLOWED_DELAY_SECONDS}s")
+            return False
+
+        return True
+
+    except Exception as e:
+        H.printt(f"{source} copy filter error | error={e}")
         return False
 
 
@@ -171,7 +192,7 @@ def fetch_order_book():
             H.printt(f"OrderBook Error: {e}")
             time.sleep(1)
 
-threading.Thread(target=fetch_order_book, daemon=True).start()
+# threading.Thread(target=fetch_order_book, daemon=True).start()
 
 # ================= QUEUES =================
 NSE_QUEUE = Queue(maxsize=4000)
@@ -355,7 +376,7 @@ if BROKER == "STRATX":
     brokerObj.load_instrument_master()
     brokerObj.sync_stratx_net_from_traded_orders(source="startup")
     brokerObj.start_retry_state_saver()
-    brokerObj.warmup_stratx_sessions()
+    # brokerObj.warmup_stratx_sessions()
 
 # ================= START 40 WORKERS =================
 NSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -440,6 +461,21 @@ def process_nse_csv():
 
         new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
 
+        allowed_rows = []
+        for row in new_rows.itertuples(index=False, name=None):
+            try:
+                row_dt = datetime.datetime.strptime(str(row[25]).strip(), "%d %b %Y %H:%M:%S")
+                if is_copy_row_allowed(row[26], row_dt, "NSE"):
+                    allowed_rows.append(row)
+            except Exception as e:
+                H.printt(f"NSE copy filter error | error={e}")
+
+        if not allowed_rows:
+            H.printt(f"NSE: skipped {len(new_rows)} rows by copy filter")
+            return
+
+        new_rows = pd.DataFrame(allowed_rows, columns=new_rows.columns)
+
         qty_col = 14
         exchange_order_id_col = 23
         agg_map = {col: "first" for col in new_rows.columns}
@@ -498,6 +534,24 @@ def process_bse_csv():
             return
 
         new_rows = new_rows.replace(r'^\s+|\s+$', '', regex=True)
+
+        allowed_rows = []
+        for row in new_rows.itertuples(index=False, name=None):
+            try:
+                row_dt = datetime.datetime.strptime(
+                    f"{str(row[14]).strip()} {str(row[15]).strip()}",
+                    "%d/%m/%Y %H:%M:%S",
+                )
+                if is_copy_row_allowed(row[-1], row_dt, "BSE"):
+                    allowed_rows.append(row)
+            except Exception as e:
+                H.printt(f"BSE copy filter error | error={e}")
+
+        if not allowed_rows:
+            H.printt(f"BSE: skipped {len(new_rows)} rows by copy filter")
+            return
+
+        new_rows = pd.DataFrame(allowed_rows, columns=new_rows.columns)
 
         qty_col = 7
         exchange_order_id_col = 16

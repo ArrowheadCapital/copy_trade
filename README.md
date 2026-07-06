@@ -73,6 +73,7 @@ The most important settings are:
 | `broker`                                                                                                                                                                  | Selects`"STRATX"`or`"GREEK"`.                                                                                                                                                                                                                                                                                        |
 | `pathNSE`/`pathBSE`                                                                                                                                                     | Daily source trade-file templates. They must contain`{formatted_date}`.                                                                                                                                                                                                                                                |
 | `multiplier`                                                                                                                                                              | Multiplies copied order quantity. Default is`1`.                                                                                                                                                                                                                                                                       |
+| `copy_source_id`                                                                                                                                                          | Source id allowed for copied rows. NSE and BSE rows with a different source id are skipped before combining.                                                                                                                                                                                                            |
 | `niftyFreeze`,`bnfFreeze`,`sensexFreeze`,`bankex`,`midcpnifty`,`finnifty`                                                                                       | Freeze quantity limits used while placing/splitting orders.                                                                                                                                                                                                                                                              |
 | `optionInstrumentPath`                                                                                                                                                    | StratX instrument CSV path, loaded from`OPTION_INSTRUMENT_CSV`in`.env`.                                                                                                                                                                                                                                              |
 | `strategy_name`                                                                                                                                                           | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value.                                                                                                                                                                                                                                  |
@@ -96,6 +97,24 @@ datetime.datetime.today().strftime("%m%d")
 For example, on June 2 the file name date part is `0602`.
 
 NSE files are comma-separated. BSE files are pipe-separated.
+
+### Copy Source Filter
+
+Rows are filtered before grouping/combining.
+
+The allowed source id is configured in `credentials.py`:
+
+```python
+copy_source_id = "ZHN086"
+```
+
+The allowed row delay is configured in `.env`:
+
+```env
+COPY_ALLOWED_DELAY_SECONDS = 120
+```
+
+A row is copied only when its source id matches `copy_source_id` and the difference between current system time and row time is less than or equal to `COPY_ALLOWED_DELAY_SECONDS`.
 
 ### Broker Selection
 
@@ -316,6 +335,8 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[15]` | Source price.                                                          |
 | `t[17]` | Client code. Filtering by this is present in comments, but not active. |
 | `t[23]` | Exchange order id used by combine logic.                               |
+| `t[25]` | Source row timestamp used by copy delay filter, for example`13 APR 2026 09:15:02`. |
+| `t[26]` | Source id used by copy source filter.                                  |
 
 ### BSE Columns Used
 
@@ -327,7 +348,10 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[7]`  | Quantity.                                                              |
 | `t[8]`  | Source price.                                                          |
 | `t[9]`  | Client code. Filtering by this is present in comments, but not active. |
+| `t[14]` | Source row date used by copy delay filter, format`DD/MM/YYYY`.         |
+| `t[15]` | Source row time used by copy delay filter, format`HH:MM:SS`.           |
 | `t[16]` | Exchange order id used by combine logic.                               |
+| `t[-1]` | Source id used by copy source filter.                                  |
 
 ## Main Runtime: `zFinalMulti.py`
 
@@ -510,7 +534,9 @@ qty_col = 7
 exchange_order_id_col = 16
 ```
 
-The code groups new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
+Before grouping, the code skips rows whose source id does not match `copy_source_id` or whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`.
+
+The code then groups allowed new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
 
 Important behavior:
 
@@ -1780,3 +1806,95 @@ Check:
 ### StratX OTM or retry price fails
 
 OTM/retry pricing uses Redis LTP data through the active Redis failover flow. If all configured Redis sources fail or return stale LTP data, the retry/OTM price is sent as `0` instead of using stale source-price fallback.
+
+## Temp Greeksoft Data Fix
+
+Temporary data compatibility changes were added in `helperGS.py`.
+
+### Expiry Parsing
+
+Before:
+
+```python
+pd.to_datetime(df["ContractExpiration"], errors="coerce").dt.strftime("%Y%m%d")
+```
+
+Now:
+
+```python
+pd.to_datetime(df["ContractExpiration"], format="%d%b%Y").dt.strftime("%Y%m%d")
+```
+
+This expects `ContractExpiration` values like:
+
+```text
+09JUN2026
+```
+
+### BSE Contract Cache
+
+Before:
+
+```python
+StratX.bse_contract_by_id_desc[(exchange_instrument_id, description)]
+```
+
+Now:
+
+```python
+StratX.bse_contract_by_desc[description]
+```
+
+### BSE Contract Lookup
+
+Before:
+
+```python
+get_bse_contract_details(exchange_instrument_id, description)
+```
+
+and the filter used both:
+
+```python
+ExchangeInstrumentID == exchange_instrument_id
+Description == description
+```
+
+Now:
+
+```python
+get_bse_contract_details(description)
+```
+
+and the filter uses:
+
+```python
+Description == description
+```
+
+### BSE Order Path
+
+Before, `placeOrderStratX_BSE()` read:
+
+```python
+exchange_instrument_id = str(trade[4]).strip()
+description = str(trade[5]).strip()
+```
+
+and called:
+
+```python
+get_bse_contract_details(exchange_instrument_id, description)
+```
+
+Now it reads only:
+
+```python
+description = str(trade[5]).strip()
+```
+
+and calls:
+
+```python
+get_bse_contract_details(description)
+```
