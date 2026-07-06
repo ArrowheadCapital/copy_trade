@@ -465,7 +465,7 @@ def process_nse_csv():
         for row in new_rows.itertuples(index=False, name=None):
             try:
                 row_dt = datetime.datetime.strptime(str(row[25]).strip(), "%d %b %Y %H:%M:%S")
-                if is_copy_row_allowed(row[26], row_dt, "NSE"):
+                if is_copy_row_allowed(row[27], row_dt, "NSE"):
                     allowed_rows.append(row)
             except Exception as e:
                 H.printt(f"NSE copy filter error | error={e}")

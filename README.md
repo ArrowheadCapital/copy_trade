@@ -105,7 +105,7 @@ Rows are filtered before grouping/combining.
 The allowed source id is configured in `credentials.py`:
 
 ```python
-copy_source_id = "ZHN086"
+copy_source_id = "TS739"
 ```
 
 The allowed row delay is configured in `.env`:
@@ -336,7 +336,7 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[17]` | Client code. Filtering by this is present in comments, but not active. |
 | `t[23]` | Exchange order id used by combine logic.                               |
 | `t[25]` | Source row timestamp used by copy delay filter, for example`13 APR 2026 09:15:02`. |
-| `t[26]` | Source id used by copy source filter.                                  |
+| `t[27]` | Source id used by copy source filter.                                  |
 
 ### BSE Columns Used
 
