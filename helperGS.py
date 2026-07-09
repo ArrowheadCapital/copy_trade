@@ -5,14 +5,13 @@ import os
 import time
 import uuid
 import atexit
-import random
 import pandas as pd
 from io import StringIO
 import credentials as cre
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from fetch_circuit import get_exchange_instrument_id, get_circuit_limits, get_ltp_avg, get_underlying_ltp
+from fetch_circuit import get_circuit_limits, get_ltp_avg, get_underlying_ltp
 from async_logger import createLogFile as async_create_log_file
 from async_logger import printt as async_printt
 
@@ -461,7 +460,7 @@ class StratX:
     market_order_offset = 8
     tick_size_by_name = {}
     lot_size_by_name = {}
-    bse_contract_by_desc = {}
+    bse_contract_by_exchange_id = {}
     otm_description_by_key = {}
     retry_instrument_by_key = {}
     expiry_yyyymmdd_cache = {}
@@ -1387,13 +1386,9 @@ class StratX:
 
                 # Precompute normalized lookup columns once for fast repeated filters
                 df["underlying_index_name_normalized"] = df["UnderlyingIndexName"].astype(str).str.strip().str.upper()
-                df["contract_expiration_yyyymmdd"] = (
-                    pd.to_datetime(df["ContractExpiration"], format="%d%b%Y")
-                    .dt.strftime("%Y%m%d")
-                )
-                # df["contract_expiration_yyyymmdd"] = pd.to_datetime(
-                #     df["ContractExpiration"], errors="coerce"
-                # ).dt.strftime("%Y%m%d")
+                df["contract_expiration_yyyymmdd"] = pd.to_datetime(
+                    df["ContractExpiration"], errors="coerce"
+                ).dt.strftime("%Y%m%d")
                 df["strike_price_numeric"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
                 df["option_type_normalized"] = df["OptionType"].astype(str).str.strip().str.upper()
 
@@ -1407,7 +1402,7 @@ class StratX:
                     if row_name and pd.notna(lot_size) and row_name not in lot_size_by_name:
                         lot_size_by_name[row_name] = int(float(lot_size))
 
-                bse_contract_by_desc = {}
+                bse_contract_by_exchange_id = {}
                 otm_description_by_key = {}
                 retry_instrument_by_key = {}
                 for row in df[[
@@ -1440,7 +1435,8 @@ class StratX:
                     tick = float(tick_size) if pd.notna(tick_size) else None
                     lot = int(float(lot_size)) if pd.notna(lot_size) else None
                     if tick is not None and expiry and expiry.lower() != "nan":
-                        bse_contract_by_desc[desc] = (
+                        exchange_id = str(exchange_instrument_id).strip()
+                        bse_contract_by_exchange_id[exchange_id] = (
                             symbol, strike, expiry, right, tick, lot
                         )
                         retry_key = (exchange_segment, name_symbol, expiry, right, strike)
@@ -1451,7 +1447,7 @@ class StratX:
 
                 StratX.tick_size_by_name = tick_size_by_name
                 StratX.lot_size_by_name = lot_size_by_name
-                StratX.bse_contract_by_desc = bse_contract_by_desc
+                StratX.bse_contract_by_exchange_id = bse_contract_by_exchange_id
                 StratX.otm_description_by_key = otm_description_by_key
                 StratX.retry_instrument_by_key = retry_instrument_by_key
                 StratX.inst_df = df
@@ -1460,20 +1456,20 @@ class StratX:
                 printt(f"Error loading instrument master: {e}")
 
 
-    def get_bse_contract_details(self, description):
+    def get_bse_contract_details(self, exchange_instrument_id):
         try:
             self.load_instrument_master()
-            description = str(description).strip()
-            cached = StratX.bse_contract_by_desc.get(description)
+            exchange_instrument_id = str(exchange_instrument_id).strip()
+            cached = StratX.bse_contract_by_exchange_id.get(exchange_instrument_id)
             if cached is not None:
                 return cached
 
             df = StratX.inst_df
 
-            row = df[df["Description"] == description]
+            row = df[df["ExchangeInstrumentID"] == exchange_instrument_id]
 
             if row.empty:
-                raise ValueError(f"BSE Instrument not found: {description}")
+                raise ValueError(f"BSE Instrument not found: {exchange_instrument_id}")
 
             row = row.iloc[0]
             expiry = pd.to_datetime(row["ContractExpiration"]).strftime("%Y%m%d")
@@ -1509,13 +1505,12 @@ class StratX:
             return None, None, None, None, None, None
 
 
-    def apply_circuit_clamp(self, price, description):
+    def apply_circuit_clamp(self, price, cache_symbol):
         try:
-            instrument_id = get_exchange_instrument_id(description, StratX.inst_df)
-            if not instrument_id:
+            if not cache_symbol:
                 return price
 
-            limits = get_circuit_limits(instrument_id)
+            limits = get_circuit_limits(cache_symbol)
             if not limits:
                 return price
 
@@ -1580,7 +1575,7 @@ class StratX:
             return 0, 0
 
 
-    def price_from_avg_ltp_or_fallback(self, side, tick_size, description, cache_symbol=None):
+    def price_from_avg_ltp_or_fallback(self, side, tick_size, cache_symbol=None):
         try:
             if cache_symbol:
                 ltp, avg = self.get_redis_ltp_avg(cache_symbol)
@@ -1613,7 +1608,7 @@ class StratX:
                     price = round_to_tick(raw, float(tick_size))
                     if price <= 0:
                         price = float(tick_size)
-                    price = self.apply_circuit_clamp(price, description)
+                    price = self.apply_circuit_clamp(price, cache_symbol)
                     return price
 
             return 0
@@ -1737,7 +1732,6 @@ class StratX:
             new_price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
-                description=description,
                 cache_symbol=cache_symbol,
             )
             order_info["price"] = new_price
@@ -2110,7 +2104,6 @@ class StratX:
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
-                description=description,
                 cache_symbol=cache_symbol,
             )
             timing_ctx["price_calc_ms"] = (time.perf_counter() - _t0) * 1000
@@ -2494,7 +2487,6 @@ class StratX:
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
-                description=description,
                 cache_symbol=cache_symbol,
             )
             if timing_ctx is not None:
@@ -2561,7 +2553,6 @@ class StratX:
                 otm_price = self.price_from_avg_ltp_or_fallback(
                     side=side,
                     tick_size=tick_size,
-                    description=otm_description,
                     cache_symbol=otm_cache_symbol,
                 )
                 if timing_ctx is not None:
@@ -2593,9 +2584,10 @@ class StratX:
 
             url = f"https://{cre.stratX_url}/api/v1/orders/place-order/"
 
+            exchange_instrument_id = str(trade[4]).strip()
             description = str(trade[5]).strip()
 
-            symbol, strike, expiry, right, tick_size, lot_size = self.get_bse_contract_details(description)
+            symbol, strike, expiry, right, tick_size, lot_size = self.get_bse_contract_details(exchange_instrument_id)
 
             if not symbol:
                 return []
@@ -2628,7 +2620,6 @@ class StratX:
             price = self.price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
-                description=description,
                 cache_symbol=cache_symbol,
             )
             if timing_ctx is not None:
@@ -2690,7 +2681,6 @@ class StratX:
                 otm_price = self.price_from_avg_ltp_or_fallback(
                     side=side,
                     tick_size=tick_size,
-                    description=otm_description,
                     cache_symbol=otm_cache_symbol,
                 )
                 if timing_ctx is not None:

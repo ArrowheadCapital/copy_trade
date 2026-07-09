@@ -4,8 +4,6 @@ import time
 from time import perf_counter
 import redis
 import threading
-import pandas as pd
-import os
 from dotenv import load_dotenv
 import credentials as cre
 from async_logger import printt
@@ -18,7 +16,6 @@ redis_lock = threading.Lock()
 active_redis_index = 0
 circuit_limits_cache = {}
 CIRCUIT_LIMITS_CACHE_TTL = 10.0
-exchange_instrument_id_cache = {}
 
 
 def get_redis_sources():
@@ -236,45 +233,13 @@ def get_underlying_ltp(channel):
         return None
 
 
-def get_exchange_instrument_id(description, df):
+def get_circuit_limits(cache_symbol, host="100.103.231.7", port=6379, db=1):
     """
-    Filter options_instruments.csv by description and return ExchangeInstrumentID.
+    Fetch circuit limits (UC and LC) for a given cache symbol from Redis.
+    Cache successful responses per cache symbol for 10 seconds.
     
     Args:
-        description (str): The description to match in the Description column
-        
-    Returns:
-        int or None: The ExchangeInstrumentID if found, None otherwise
-    """
-    try:
-        description = str(description).strip()
-
-        cached = exchange_instrument_id_cache.get(description)
-        if cached is not None:
-            return cached
-
-        filtered = df[df['Description'] == description]
-        
-        if filtered.empty:
-            printt(f"No instrument found with description: {description}")
-            return None
-        
-        # Return the first ExchangeInstrumentID found
-        instrument_id = int(filtered.iloc[0]['ExchangeInstrumentID'])
-        exchange_instrument_id_cache[description] = instrument_id
-        return instrument_id
-    
-    except Exception as e:
-        printt(f"Error in get_exchange_instrument_id: {e}")
-        return None
-
-def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
-    """
-    Fetch circuit limits (UC and LC) for a given instrument ID from Redis.
-    Cache successful responses per instrument ID for 10 seconds.
-    
-    Args:
-        instrument_id (int): The ExchangeInstrumentID
+        cache_symbol (str): Instrument cache symbol, for example NIFTY14JUL2619400CE
         host (str): Redis host (default: DESKTOP-CLI5HO6)
         port (int): Redis port (default: 6379)
         db (int): Redis DB index (default: 1)
@@ -283,7 +248,10 @@ def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
         dict: Dictionary with 'UC' and 'LC' keys, or None if not found
     """
     try:
-        cache_key = str(instrument_id)
+        cache_key = str(cache_symbol).strip().upper()
+        if not cache_key:
+            return None
+
         now = perf_counter()
 
         cached = circuit_limits_cache.get(cache_key)
@@ -292,7 +260,7 @@ def get_circuit_limits(instrument_id, host="100.103.231.7", port=6379, db=1):
             if now - cached_at <= CIRCUIT_LIMITS_CACHE_TTL:
                 return cached_result
 
-        key = f"cache:CIRCUIT_{instrument_id}"
+        key = f"cache:CIRCUIT_{cache_key}"
         sources, order = get_redis_order()
 
         for index in order:

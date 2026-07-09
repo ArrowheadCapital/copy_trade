@@ -909,7 +909,7 @@ It builds normalized dataframe columns and precomputed maps:
 ```python
 tick_size_by_name
 lot_size_by_name
-bse_contract_by_id_desc
+bse_contract_by_exchange_id
 otm_description_by_key
 retry_instrument_by_key
 ```
@@ -932,7 +932,7 @@ YYYYMMDD
 DDMMMYY
 ```
 
-### `get_bse_contract_details(exchange_instrument_id, description)`
+### `get_bse_contract_details(exchange_instrument_id)`
 
 Converts BSE order rows into usable StratX fields.
 
@@ -942,7 +942,7 @@ It returns:
 (symbol, strike, expiry, right, tick_size, lot_size)
 ```
 
-It first checks `bse_contract_by_id_desc`, then falls back to dataframe filtering.
+It first checks `bse_contract_by_exchange_id`, then falls back to dataframe filtering by `ExchangeInstrumentID`.
 
 ### `get_otm_strike(symbol, right, strike, offset)`
 
@@ -995,12 +995,23 @@ cache:LTP_SENSEX
 
 It parses `payload.LTP` and uses the value only if `payload.Time` is not older than 10 seconds. Redis source failover works the same way as `get_redis_ltp_avg()`. StratX also keeps a 0.2 second in-memory cache for this underlying ITM lookup.
 
-`apply_circuit_clamp(price, description)`:
+`apply_circuit_clamp(price, cache_symbol)`:
 
-1. Finds `ExchangeInstrumentID` from the instrument dataframe.
-2. Reads circuit limits from Redis.
-3. Uses limits only if Redis timestamp is not older than 300 seconds.
-4. Clamps price to LC/UC when required.
+1. Reads circuit limits from Redis using the same cache symbol format as LTP.
+2. Uses limits only if Redis timestamp is not older than 300 seconds.
+3. Clamps price to LC/UC when required.
+
+Circuit Redis keys use:
+
+```text
+cache:CIRCUIT_<CACHE_SYMBOL>
+```
+
+Example:
+
+```text
+cache:CIRCUIT_NIFTY14JUL2619400CE
+```
 
 If all Redis sources fail for circuit data, circuit clamping is skipped and the calculated price is left unchanged.
 
@@ -1623,22 +1634,12 @@ Creates and reuses one Redis client per configured Redis source. Current default
 
 The Redis client uses connect/read timeouts of 1 second. Clients are cached and reused; they are not recreated for every read.
 
-### `get_exchange_instrument_id(description, df)`
-
-Finds `ExchangeInstrumentID` in the StratX instrument dataframe using the instrument `Description`.
-
-It caches:
-
-```text
-description -> ExchangeInstrumentID
-```
-
-### `get_circuit_limits(instrument_id, ...)`
+### `get_circuit_limits(cache_symbol, ...)`
 
 Reads:
 
 ```text
-cache:CIRCUIT_<instrument_id>
+cache:CIRCUIT_<CACHE_SYMBOL>
 ```
 
 from Redis and returns:
@@ -1807,94 +1808,68 @@ Check:
 
 OTM/retry pricing uses Redis LTP data through the active Redis failover flow. If all configured Redis sources fail or return stale LTP data, the retry/OTM price is sent as `0` instead of using stale source-price fallback.
 
-## Temp Greeksoft Data Fix
+## XTS And Greeksoft Data Standardization
 
-Temporary data compatibility changes were added in `helperGS.py`.
+The StratX path is standardized so XTS-style and Greeksoft-style instrument data can both work when the structured fields are correct.
 
 ### Expiry Parsing
 
-Before:
+Instrument `ContractExpiration` is parsed flexibly:
 
 ```python
 pd.to_datetime(df["ContractExpiration"], errors="coerce").dt.strftime("%Y%m%d")
 ```
 
-Now:
-
-```python
-pd.to_datetime(df["ContractExpiration"], format="%d%b%Y").dt.strftime("%Y%m%d")
-```
-
-This expects `ContractExpiration` values like:
+This supports ISO datetime values such as:
 
 ```text
-09JUN2026
-```
-
-### BSE Contract Cache
-
-Before:
-
-```python
-StratX.bse_contract_by_id_desc[(exchange_instrument_id, description)]
-```
-
-Now:
-
-```python
-StratX.bse_contract_by_desc[description]
+2026-07-14T14:30:00
+2026-07-14T15:30:00
 ```
 
 ### BSE Contract Lookup
 
-Before:
+BSE contract details use `ExchangeInstrumentID`, not `Description`.
+
+The cache is:
 
 ```python
-get_bse_contract_details(exchange_instrument_id, description)
+StratX.bse_contract_by_exchange_id[exchange_instrument_id]
 ```
 
-and the filter used both:
-
-```python
-ExchangeInstrumentID == exchange_instrument_id
-Description == description
-```
-
-Now:
-
-```python
-get_bse_contract_details(description)
-```
-
-and the filter uses:
-
-```python
-Description == description
-```
-
-### BSE Order Path
-
-Before, `placeOrderStratX_BSE()` read:
+`placeOrderStratX_BSE()` reads:
 
 ```python
 exchange_instrument_id = str(trade[4]).strip()
 description = str(trade[5]).strip()
 ```
 
-and called:
+and resolves contract details with:
 
 ```python
-get_bse_contract_details(exchange_instrument_id, description)
+get_bse_contract_details(exchange_instrument_id)
 ```
 
-Now it reads only:
+The `description` value is retained for logs/local metadata only.
 
-```python
-description = str(trade[5]).strip()
+### Monthly Expiry Descriptions
+
+Vendor description formats can differ for monthly expiry, for example:
+
+```text
+NIFTY26JUL24500PE
+NIFTY2672824500PE
 ```
 
-and calls:
+Pricing and circuit lookup do not depend on these description strings. Redis keys are generated from structured fields:
 
-```python
-get_bse_contract_details(description)
+```text
+Name + DDMMMYY expiry + StrikePrice + CE/PE
+```
+
+Example:
+
+```text
+cache:LTP_NIFTY28JUL2624500PE
+cache:CIRCUIT_NIFTY28JUL2624500PE
 ```
