@@ -83,11 +83,15 @@ def sync_stratx_net():
 
 def on_close():
     try:
-        broker_object = globals().get("brokerObj")
-        if broker_object is not None and hasattr(broker_object, "save_stratx_net_state_now"):
-            broker_object.save_stratx_net_state_now()
-        if broker_object is not None and hasattr(broker_object, "save_retry_state_now"):
-            broker_object.save_retry_state_now()
+        if cre.broker.upper() == "STRATX":
+            broker_object = globals().get("brokerObj")
+            if broker_object is not None and hasattr(broker_object, "save_stratx_net_state_now"):
+                broker_object.save_stratx_net_state_now()
+            if broker_object is not None and hasattr(broker_object, "save_retry_state_now"):
+                broker_object.save_retry_state_now()
+            reconciliation_manager = globals().get("stratx_reconciliation_manager")
+            if reconciliation_manager is not None:
+                reconciliation_manager.save_state_now()
     except Exception as e:
         print(f"[WARN] StratX state final save failed: {e}")
     print("[INFO] Exiting application and terminating all threads.")

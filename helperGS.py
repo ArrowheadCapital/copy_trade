@@ -472,7 +472,7 @@ class StratX:
     redis_underlying_ltp_cache = {}
     redis_underlying_ltp_cache_ttl = 0.2
     stratx_order_workers = 20
-    stratx_request_timeout = 5
+    stratx_request_timeout = 15
     stratx_http_max_attempts = 2
     stratx_http_retry_sleep = 0.3
     stratx_thread_local = threading.local()
@@ -526,6 +526,26 @@ class StratX:
             return session
         except Exception as e:
             raise RuntimeError(f"Error creating StratX HTTP session: {e}")
+
+    def reset_stratx_session(self):
+        session = getattr(StratX.stratx_thread_local, "session", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        StratX.stratx_thread_local.session = None
+
+    def is_connection_reset_10054(self, error):
+        if isinstance(error, ConnectionResetError):
+            error_code = getattr(error, "winerror", None) or getattr(error, "errno", None)
+            return error_code == 10054 or (error.args and error.args[0] == 10054)
+
+        return any(
+            self.is_connection_reset_10054(arg)
+            for arg in getattr(error, "args", ())
+            if isinstance(arg, BaseException)
+        )
 
     def warmup_single_stratx_session(self, worker_index, url, headers, payload):
         try:
@@ -654,10 +674,14 @@ class StratX:
             page_number = 1
             max_pages = 100
             all_data = []
+            net_client_id = str(
+                getattr(cre, "STRATX_NET_CLIENT_ID", "Y05601")
+            ).strip()
 
             payload = json.dumps({
                 "id": cre.id,
                 "secret_key": cre.secret_key,
+                "client_id": net_client_id,
                 "status": ["TRADED"]
             })
             headers = {"Content-Type": "application/json"}
@@ -969,6 +993,15 @@ class StratX:
                 self.mark_stratx_net_state_dirty_locked()
 
             printt(f"STRATX_NET_RELEASE | root_id={root_key} | bucket={bucket} | signed_qty={signed_qty} | current={next_net} | reason={reason}")
+
+            try:
+                order_meta = self.get_order_meta(root_key)
+                reconciliation_key = str(order_meta.get("reconciliation_key", "")).strip()
+                reconciliation_manager = getattr(self, "reconciliation_manager", None)
+                if reconciliation_key and reconciliation_manager is not None:
+                    reconciliation_manager.mark_correction_failed(root_key, reconciliation_key, reason)
+            except Exception as reconciliation_error:
+                printt(f"STRATX_RECON_FAILURE_STATE_ERROR | root_id={root_key} | error={reconciliation_error}")
             return True
         except Exception as e:
             printt(f"STRATX_NET_RELEASE_ERROR | root_id={root_order_id} | error={e}")
@@ -1754,12 +1787,33 @@ class StratX:
 
             for attempt in range(1, StratX.stratx_http_max_attempts + 1):
                 attempt_start_ts = time.perf_counter()
-                response = session.post(
-                    url,
-                    headers=headers,
-                    data=current_payload,
-                    timeout=StratX.stratx_request_timeout
-                )
+                try:
+                    response = session.post(
+                        url,
+                        headers=headers,
+                        data=current_payload,
+                        timeout=StratX.stratx_request_timeout
+                    )
+                except Exception as request_error:
+                    http_ms = (time.perf_counter() - attempt_start_ts) * 1000
+                    should_retry_reset = (
+                        attempt < StratX.stratx_http_max_attempts
+                        and http_ms <= 10.0
+                        and self.is_connection_reset_10054(request_error)
+                    )
+
+                    if not should_retry_reset:
+                        raise
+
+                    printt(f"STRATX_CONNECTION_RESET_RETRY | attempt={attempt} | max={StratX.stratx_http_max_attempts} | error_code=10054 | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | http={http_ms:.1f}ms | action=reset_session_reprice_retry")
+
+                    self.reset_stratx_session()
+                    session = self.get_stratx_session()
+                    new_price = self.recalculate_stratx_http_retry_price(order_info)
+                    current_payload = self.update_stratx_payload_price(current_payload, new_price)
+
+                    printt(f"STRATX_HTTP_RETRY_REPRICE | next_attempt={attempt + 1} | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={new_price} | description={order_info.get('description')} | reason=connection_reset_10054")
+                    continue
 
                 request_end_ts = time.perf_counter()
                 http_ms = (request_end_ts - attempt_start_ts) * 1000
@@ -2277,7 +2331,7 @@ class StratX:
         except Exception as e:
             printt(f"Error in retry_failed_orderbook_orders: {e}")
 
-    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez, lot_size=None, csv_read_ts=None, timing_ctx=None, root_order_id=None, client_ids=None, description=None, net_meta=None):
+    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez, lot_size=None, csv_read_ts=None, timing_ctx=None, root_order_id=None, client_ids=None, description=None, net_meta=None, reconciliation_key=None):
         try:
             submitted_future = False
             reserved_net_meta = None
@@ -2347,7 +2401,7 @@ class StratX:
             if root_order_id is None:
                 root_order_id = str(uuid.uuid4())
 
-            self.register_order_meta(root_order_id, {
+            order_meta = {
                 "quantity": int(float(quantity)),
                 "symbol": symbol,
                 "strike": strike,
@@ -2358,7 +2412,10 @@ class StratX:
                 "right": right,
                 "strategy_name": strategy_name,
                 "description": description,
-            })
+            }
+            if reconciliation_key:
+                order_meta["reconciliation_key"] = str(reconciliation_key)
+            self.register_order_meta(root_order_id, order_meta)
 
             order_info = {
                 "client_ids": payload_client_ids,
@@ -2386,6 +2443,14 @@ class StratX:
             )
 
             self.register_future_root_id(future, root_order_id, net_meta)
+            if reconciliation_key:
+                reconciliation_manager = getattr(self, "reconciliation_manager", None)
+                if reconciliation_manager is not None:
+                    try:
+                        reconciliation_manager.mark_correction_submitted(str(reconciliation_key), root_order_id, quantity, side)
+                    except Exception as reconciliation_error:
+                        printt(f"STRATX_RECON_SUBMIT_STATE_FAILED | root_id={root_order_id} | error={reconciliation_error}")
+
             future.add_done_callback(self.log_stratx_future_result)
             submitted_future = True
 

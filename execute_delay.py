@@ -1,13 +1,13 @@
 import os
 import pandas as pd
 
-INPUT_CSV = r"\\DESKTOP-CLI5HO6\Desktop\Codes\copy_trade_volatility_core\Trades\20260624.csv"
-OUTPUT_CSV = os.path.join(os.getcwd(), "20260624_latency_volatility.csv")
+INPUT_CSV = r"\\DESKTOP-CLI5HO6\Desktop\Codes\copy_trade_volatility_core\Trades\20260715.csv"
+OUTPUT_CSV = os.path.join(os.getcwd(), "20260715_latency_volatility.csv")
 
 # Read only required columns
 df = pd.read_csv(
     INPUT_CSV,
-    usecols=["created_at", "executed_on", "reference_id", "status", "client_id", "initiated_price", "price"]
+    usecols=["created_at", "executed_on", "reference_id", "status", "client_id", "trading_symbol", "quantity", "buyorsell", "initiated_price", "price", "trigger"]
 )
 
 # Filter TRADED rows
@@ -30,7 +30,7 @@ df["execution_delay_seconds"] = (
 ).dt.total_seconds()
 
 # Output
-df[["reference_id", "client_id", "execution_delay_seconds","created_at", "executed_on", "initiated_price", "price"]].to_csv(
+df[["reference_id", "client_id", "trading_symbol", "quantity", "buyorsell", "execution_delay_seconds", "created_at", "executed_on", "initiated_price", "price", "trigger"]].to_csv(
     OUTPUT_CSV,
     index=False
 )

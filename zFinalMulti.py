@@ -11,6 +11,7 @@ import threading
 import pandas as pd
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
+from stratx_reconciliation import StratXReconciliation
 try:
     from file_watcher import start_file_watcher
     file_watcher_import_error = None
@@ -68,6 +69,11 @@ POLL_INTERVAL = 0.25
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
 COPY_SOURCE_ID = str(getattr(cre, "copy_source_id", "")).strip().upper()
 COPY_ALLOWED_DELAY_SECONDS = float(os.getenv("COPY_ALLOWED_DELAY_SECONDS", "0") or 0)
+RECON_INTERVAL_SECONDS = 5
+RECON_REQUIRED_CONFIRMATIONS = 5
+RECON_COOLDOWN_SECONDS = 120
+RECON_REPORT_ONLY = True
+RECON_STATE_FILE = "stratx_recon_state.json"
 
 # Risk limits (commented out for now, can enable later)
 # MAX_POSITION_VALUE = 5000000
@@ -464,6 +470,16 @@ def process_nse_csv():
         allowed_rows = []
         for row in new_rows.itertuples(index=False, name=None):
             try:
+                instrument_type = str(row[2]).strip().upper()
+                if instrument_type != "OPTIDX":
+                    H.printt(f"NSE skip instrument type | actual={instrument_type}")
+                    continue
+
+                underlying = str(row[3]).strip().upper()
+                if underlying != "NIFTY":
+                    H.printt(f"NSE skip underlying | actual={underlying}")
+                    continue
+
                 row_dt = datetime.datetime.strptime(str(row[25]).strip(), "%d %b %Y %H:%M:%S")
                 if is_copy_row_allowed(row[27], row_dt, "NSE"):
                     allowed_rows.append(row)
@@ -538,6 +554,16 @@ def process_bse_csv():
         allowed_rows = []
         for row in new_rows.itertuples(index=False, name=None):
             try:
+                instrument_type = str(row[17]).strip().upper()
+                if "OPT" not in instrument_type:
+                    H.printt(f"BSE skip instrument type | actual={instrument_type}")
+                    continue
+
+                trading_symbol = str(row[5]).strip().upper()
+                if not trading_symbol.startswith("SENSEX"):
+                    H.printt(f"BSE skip underlying | actual={trading_symbol}")
+                    continue
+
                 row_dt = datetime.datetime.strptime(
                     f"{str(row[14]).strip()} {str(row[15]).strip()}",
                     "%d/%m/%Y %H:%M:%S",
@@ -595,6 +621,29 @@ else:
     if file_watcher_import_error is not None:
         H.printt(f"File watcher import failed: {file_watcher_import_error}")
     H.printt("File watcher failed to start - fallback polling active")
+
+stratx_reconciliation_manager = None
+if BROKER == "STRATX":
+    try:
+        stratx_reconciliation_manager = StratXReconciliation(
+            broker=brokerObj,
+            nse_path=csvPathNSE,
+            bse_path=csvPathBSE,
+            copy_source_id=COPY_SOURCE_ID,
+            client_id=getattr(cre, "STRATX_NET_CLIENT_ID", "Y05601"),
+            multiplier=getattr(cre, "multiplier", 1),
+            strategy_name=getattr(cre, "strategy_name", ""),
+            order_url=f"https://{cre.stratX_url}/api/v1/orders/place-order/",
+            is_market_open=is_market_open,
+            interval_seconds=RECON_INTERVAL_SECONDS,
+            required_confirmations=RECON_REQUIRED_CONFIRMATIONS,
+            cooldown_seconds=RECON_COOLDOWN_SECONDS,
+            report_only=RECON_REPORT_ONLY,
+            state_file=RECON_STATE_FILE,
+        )
+        stratx_reconciliation_manager.start()
+    except Exception as e:
+        H.printt(f"STRATX_RECON_START_FAILED | error={e}")
 
 FALLBACK_POLL_INTERVAL = 5.0
 

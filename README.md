@@ -15,6 +15,7 @@ This README explains the complete project flow and the important functions in th
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `zFinalMulti.py`        | Main runtime. Reads CSV files, starts workers, queues trades, polls orderbook, and dispatches broker orders.              |
 | `helperGS.py`           | Broker layer. Contains Greeksoft and StratX implementations plus shared helpers.                                          |
+| `stratx_reconciliation.py` | StratX desired-versus-traded position comparison, stable mismatch confirmation, correction lifecycle, and state persistence. |
 | `credentials.py`        | Runtime configuration: broker choice, CSV paths, freeze quantities, API credentials, strategy name, instrument file path. |
 | `file_watcher.py`       | Watchdog-based file watcher that triggers CSV processing immediately when input files change.                             |
 | `async_logger.py`       | Non-blocking logger used by`printt()`and daily log files.                                                               |
@@ -26,6 +27,7 @@ This README explains the complete project flow and the important functions in th
 | `heading.py`            | Small GUI heading text source used by`zzEXE.py`.                                                                        |
 | `state.json`            | StratX retry state file created/updated at runtime.                                                                       |
 | `stratx_net_state.json` | StratX runtime net-position state file created/updated at runtime.                                                        |
+| `stratx_recon_state.json` | StratX pending-correction and cooldown state created/updated at runtime.                                                |
 | `trades.csv`            | Latest orderbook snapshot written by the orderbook polling thread.                                                        |
 
 ## Runtime Overview
@@ -64,7 +66,7 @@ NSE/BSE trade CSV changes
 
 ## Configuration
 
-All runtime configuration lives in `credentials.py`.
+Broker and account configuration lives in `credentials.py`. Reconciliation timing and rollout controls are kept beside the runtime settings in `zFinalMulti.py`.
 
 The most important settings are:
 
@@ -115,6 +117,29 @@ COPY_ALLOWED_DELAY_SECONDS = 120
 ```
 
 A row is copied only when its source id matches `copy_source_id` and the difference between current system time and row time is less than or equal to `COPY_ALLOWED_DELAY_SECONDS`.
+
+The live option-copy scope is additionally restricted to:
+
+```text
+NSE: instrument type OPTIDX and underlying NIFTY
+BSE: instrument field containing OPT and trading symbol beginning with SENSEX
+```
+
+The same source-id, option-type, and underlying filters are reused by StratX position reconciliation.
+
+### StratX Reconciliation Settings
+
+Reconciliation settings are intentionally local to `zFinalMulti.py`; they are not added to `credentials.py`:
+
+```python
+RECON_INTERVAL_SECONDS = 30
+RECON_REQUIRED_CONFIRMATIONS = 3
+RECON_COOLDOWN_SECONDS = 120
+RECON_REPORT_ONLY = True
+RECON_STATE_FILE = "stratx_recon_state.json"
+```
+
+`RECON_REPORT_ONLY` defaults to `True`. In this mode the system calculates and confirms mismatches but does not submit correction orders. Change it to `False` only after validating report-only logs with live trading data.
 
 ### Broker Selection
 
@@ -351,6 +376,7 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[14]` | Source row date used by copy delay filter, format`DD/MM/YYYY`.         |
 | `t[15]` | Source row time used by copy delay filter, format`HH:MM:SS`.           |
 | `t[16]` | Exchange order id used by combine logic.                               |
+| `t[17]` | Instrument description/type field; reconciliation and live copying require it to contain `OPT`. |
 | `t[-1]` | Source id used by copy source filter.                                  |
 
 ## Main Runtime: `zFinalMulti.py`
@@ -371,6 +397,7 @@ At startup it:
 8. Preloads StratX net state, instrument data, and retry state if broker is StratX.
 9. Starts NSE/BSE worker pools.
 10. Starts the file watcher and fallback poll loop.
+11. Starts StratX reconciliation in its own daemon thread when the selected broker is StratX.
 
 ### `read_csv_safely(path, sep=',', max_retries=3)`
 
@@ -534,7 +561,7 @@ qty_col = 7
 exchange_order_id_col = 16
 ```
 
-Before grouping, the code skips rows whose source id does not match `copy_source_id` or whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`.
+Before grouping, the code skips rows whose source id does not match `copy_source_id`, whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`, or which fall outside the NIFTY/SENSEX option scope described above.
 
 The code then groups allowed new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
 
@@ -560,6 +587,115 @@ FALLBACK_POLL_INTERVAL = 5.0
 ```
 
 This is a safety net in case a file event is missed.
+
+## StratX Position Reconciliation
+
+StratX reconciliation compares the full current-day source position with the TRADED position of reference client `STRATX_NET_CLIENT_ID` (normally `Y05601`). It runs independently from live file detection and order workers.
+
+### Desired Position
+
+The reconciliation manager reads stable snapshots of the current NSE and BSE source files. It checks file size and modification time before and after each read; a file that changes during reading is skipped for that cycle.
+
+Unchanged source files reuse a cached desired-position calculation. This avoids reparsing full files on every 30-second reconciliation cycle.
+
+Selected source rows are transformed using the same relevant StratX rules:
+
+* configured quantity multiplier;
+* Volatility Core quantity doubling;
+* Impulse Core strike offset;
+* BSE exchange-instrument lookup;
+* existing expiry and symbol normalization;
+* BUY as positive quantity and SELL as negative quantity.
+
+Positions are aggregated using an exact canonical contract key:
+
+```text
+Exchange | NIFTY/SENSEX | YYYYMMDD expiry | Strike | CE/PE
+```
+
+Examples:
+
+```text
+NSEFO|NIFTY|20260714|24350|CE
+BSEFO|SENSEX|20260709|78400|PE
+```
+
+### Actual Position
+
+`fetch_stratx_traded_orders()` requests TRADED rows for the reference client. Reconciliation retains the local client-id validation and normalizes report symbols such as `BSX` back to `SENSEX` before aggregation.
+
+Reconciliation does not call `sync_stratx_net_from_traded_orders()` and does not overwrite the live reserved-net value. Desired and actual comparison dictionaries are local to the reconciliation manager.
+
+### Stable Mismatch Confirmation
+
+For each exact contract:
+
+```text
+difference = desired net - actual net
+```
+
+The same non-zero difference must appear in three consecutive successful checks. A changed difference restarts confirmation at one; a zero difference clears it. Failed source reads and failed StratX report fetches do not increase confirmation counts. A successfully read source snapshot is used even if the file is updated during that read; that snapshot is not cached, so the next cycle reads the file again.
+
+Each contract is tracked independently, so differences in multiple instruments are confirmed and corrected separately. Correction orders use the existing StratX order executor and the same placement pipeline as live orders. Reconciliation checks continue even while new NSE or BSE input is being processed; the three consecutive confirmations protect against temporary differences.
+
+### Correction Placement
+
+The reference client is used to detect mismatches, but a correction is submitted with an empty `client_ids` list, matching normal broadcast behavior for all configured clients.
+
+Correction pricing reuses the existing instrument-master, Redis LTP/average, tick rounding, market offset, and circuit-clamp helpers. The exact transformed contract is sent through `place_stratx_single_order()` so strategy transformation is not applied a second time.
+
+Corrections also reuse existing:
+
+* ITM protection;
+* lot-size and freeze-quantity handling;
+* net reservation and partial-quantity rules;
+* StratX HTTP handling and repricing;
+* root/reference tracking;
+* rejected/cancelled order retry;
+* reserved-net release after final failure.
+
+The reconciliation module is imported and started only when `BROKER == "STRATX"`. GreekSoft runs do not import it, create its background threads, fetch StratX reports, or initialize its state.
+
+### Pending Corrections, Retry, And Cooldown
+
+Once a correction is submitted, its exact contract is marked pending. Confirmation stops for that contract until the correction or its retry settles.
+
+The existing retry policy remains authoritative. Reconciliation does not create a second retry mechanism. A retryable cancellation or PRICE/LPP rejection remains under the same correction root and does not reserve net again.
+
+When the correction quantity appears in the reference client's TRADED report, pending state is cleared and the contract enters a 120-second cooldown. On final failure, existing code releases reserved net, reconciliation clears pending state, starts cooldown, and requires three new confirmations before another correction.
+
+### Reconciliation State Persistence
+
+Only pending corrections and unexpired cooldowns are stored in `stratx_recon_state.json`. Confirmation counts are intentionally not persisted and restart from zero after application restart.
+
+The saver follows the same pattern as the existing retry and net-state savers:
+
+```text
+state change
+  -> mark dirty
+  -> take a locked snapshot
+  -> write stratx_recon_state.json.tmp
+  -> atomically replace stratx_recon_state.json
+```
+
+A daemon saver checks dirty state every second, critical correction transitions are saved immediately, and GUI shutdown requests one final save. State from a previous trading date is discarded. Restored pending corrections remain blocked until their saved root/reference can be resolved as traded or finally failed.
+
+### Reconciliation Logs
+
+Report-only mismatch example:
+
+```text
+STRATX_RECON_MISMATCH | contract=NSEFO|NIFTY|20260714|24350|CE | desired=195 | actual=130 | diff=65 | action=BUY 65 | confirmation=2/3 | report_only=True
+```
+
+Correction lifecycle logs include:
+
+```text
+STRATX_RECON_CORRECTION_SUBMITTED
+STRATX_RECON_CORRECTION_TRADED
+STRATX_RECON_CORRECTION_FAILED
+STRATX_RECON_CORRECTION_SKIPPED
+```
 
 ## Logging
 
