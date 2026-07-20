@@ -484,6 +484,7 @@ class StratX:
     retry_state_save_interval = 1
     max_orderbook_retries = 1
     retry_state_lock = threading.Lock()
+    retry_state_save_lock = threading.Lock()
     retry_state_dirty = False
     retry_state_loaded = False
     retry_state_saver_started = False
@@ -492,6 +493,7 @@ class StratX:
     future_net_meta = {}
     net_state_file = "stratx_net_state.json"
     net_state_save_interval = 1
+    net_state_save_lock = threading.Lock()
     net_state_dirty = False
     net_state_saver_started = False
     net_buckets = ("NIFTY_CE", "NIFTY_PE", "SENSEX_CE", "SENSEX_PE")
@@ -840,19 +842,20 @@ class StratX:
         StratX.net_state_dirty = True
 
     def save_stratx_net_state_now(self):
-        try:
-            with StratX.net_lock:
-                state = self.get_stratx_net_state_snapshot_locked()
-                StratX.net_state_dirty = False
+        with StratX.net_state_save_lock:
+            try:
+                with StratX.net_lock:
+                    state = self.get_stratx_net_state_snapshot_locked()
+                    StratX.net_state_dirty = False
 
-            temp_path = f"{StratX.net_state_file}.tmp"
-            with open(temp_path, "w") as state_file:
-                json.dump(state, state_file, indent=2)
-            os.replace(temp_path, StratX.net_state_file)
-        except Exception as e:
-            with StratX.net_lock:
-                StratX.net_state_dirty = True
-            printt(f"STRATX_NET_STATE_SAVE_FAILED | error={e}")
+                temp_path = f"{StratX.net_state_file}.tmp"
+                with open(temp_path, "w") as state_file:
+                    json.dump(state, state_file, indent=2)
+                os.replace(temp_path, StratX.net_state_file)
+            except Exception as e:
+                with StratX.net_lock:
+                    StratX.net_state_dirty = True
+                printt(f"STRATX_NET_STATE_SAVE_FAILED | error={e}")
 
     def stratx_net_state_saver_loop(self):
         while True:
@@ -972,6 +975,8 @@ class StratX:
             if not root_key:
                 return False
 
+            self.clear_unsettled_order(root_key, reason)
+
             if not bucket or signed_qty is None:
                 printt(f"STRATX_NET_RELEASE_SKIPPED | root_id={root_key} | reason=missing_net_data | source_reason={reason}")
                 return False
@@ -1053,6 +1058,7 @@ class StratX:
             "reference_id_to_root_id": {},
             "retry_by_root": {},
             "order_meta_by_root": {},
+            "unsettled_by_root": {},
         }
     
     def normalize_retry_by_root_state(self, retry_by_root):
@@ -1196,6 +1202,7 @@ class StratX:
                     printt(f"STRATX_RETRY_STATE_LOAD_FAILED | error={e}")
 
             state_needs_save = False
+            orphaned_unsettled = {}
             if not isinstance(state, dict) or state.get("date") != today:
                 state = self.get_empty_retry_state()
                 state_needs_save = True
@@ -1205,14 +1212,36 @@ class StratX:
                     "reference_id_to_root_id": state.get("reference_id_to_root_id", {}) if isinstance(state.get("reference_id_to_root_id"), dict) else {},
                     "retry_by_root": self.normalize_retry_by_root_state(state.get("retry_by_root", {})),
                     "order_meta_by_root": self.normalize_order_meta_by_root_state(state.get("order_meta_by_root", {})),
+                    "unsettled_by_root": {
+                        str(root_id): str(contract_key)
+                        for root_id, contract_key in (state.get("unsettled_by_root", {}).items() if isinstance(state.get("unsettled_by_root"), dict) else [])
+                        if str(root_id).strip() and str(contract_key).strip()
+                    },
                 }
+
+                referenced_roots = {
+                    str(root_id).strip()
+                    for root_id in state["reference_id_to_root_id"].values()
+                    if str(root_id).strip()
+                }
+                orphaned_unsettled = {
+                    root_id: contract_key
+                    for root_id, contract_key in state["unsettled_by_root"].items()
+                    if root_id not in referenced_roots
+                }
+                for root_id in orphaned_unsettled:
+                    state["unsettled_by_root"].pop(root_id, None)
+                if orphaned_unsettled:
+                    state_needs_save = True
 
             with StratX.retry_state_lock:
                 StratX.retry_state = state
                 StratX.retry_state_loaded = True
                 StratX.retry_state_dirty = state_needs_save or not os.path.exists(StratX.retry_state_file)
 
-            printt(f"STRATX_RETRY_STATE_LOADED | refs={len(state['reference_id_to_root_id'])} | roots={len(state['retry_by_root'])}")
+            for root_id, contract_key in orphaned_unsettled.items():
+                printt(f"STRATX_ORDER_SETTLED | root_id={root_id} | contract={contract_key} | reason=restart_without_reference")
+            printt(f"STRATX_RETRY_STATE_LOADED | refs={len(state['reference_id_to_root_id'])} | roots={len(state['retry_by_root'])} | unsettled={len(state['unsettled_by_root'])}")
         except Exception as e:
             printt(f"Error loading StratX retry state: {e}")
             with StratX.retry_state_lock:
@@ -1231,31 +1260,34 @@ class StratX:
                 "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
                 "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
                 "order_meta_by_root": self.serialize_order_meta_by_root_state(StratX.retry_state.get("order_meta_by_root", {})),
+                "unsettled_by_root": dict(StratX.retry_state.get("unsettled_by_root", {})),
             }
 
     def save_retry_state_now(self):
-        try:
-            with StratX.retry_state_lock:
-                if not StratX.retry_state_loaded:
-                    StratX.retry_state = self.get_empty_retry_state()
-                    StratX.retry_state_loaded = True
+        with StratX.retry_state_save_lock:
+            try:
+                with StratX.retry_state_lock:
+                    if not StratX.retry_state_loaded:
+                        StratX.retry_state = self.get_empty_retry_state()
+                        StratX.retry_state_loaded = True
 
-                state_snapshot = {
-                    "date": StratX.retry_state.get("date", self.get_retry_state_date()),
-                    "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
-                    "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
-                    "order_meta_by_root": self.serialize_order_meta_by_root_state(StratX.retry_state.get("order_meta_by_root", {})),
-                }
-                StratX.retry_state_dirty = False
+                    state_snapshot = {
+                        "date": StratX.retry_state.get("date", self.get_retry_state_date()),
+                        "reference_id_to_root_id": dict(StratX.retry_state.get("reference_id_to_root_id", {})),
+                        "retry_by_root": self.serialize_retry_by_root_state(StratX.retry_state.get("retry_by_root", {})),
+                        "order_meta_by_root": self.serialize_order_meta_by_root_state(StratX.retry_state.get("order_meta_by_root", {})),
+                        "unsettled_by_root": dict(StratX.retry_state.get("unsettled_by_root", {})),
+                    }
+                    StratX.retry_state_dirty = False
 
-            temp_path = f"{StratX.retry_state_file}.tmp"
-            with open(temp_path, "w") as state_file:
-                json.dump(state_snapshot, state_file, indent=2)
-            os.replace(temp_path, StratX.retry_state_file)
-        except Exception as e:
-            with StratX.retry_state_lock:
-                StratX.retry_state_dirty = True
-            printt(f"STRATX_RETRY_STATE_SAVE_FAILED | error={e}")
+                temp_path = f"{StratX.retry_state_file}.tmp"
+                with open(temp_path, "w") as state_file:
+                    json.dump(state_snapshot, state_file, indent=2)
+                os.replace(temp_path, StratX.retry_state_file)
+            except Exception as e:
+                with StratX.retry_state_lock:
+                    StratX.retry_state_dirty = True
+                printt(f"STRATX_RETRY_STATE_SAVE_FAILED | error={e}")
 
     def retry_state_saver_loop(self):
         while True:
@@ -1332,6 +1364,63 @@ class StratX:
         except Exception as e:
             printt(f"STRATX_ORDER_META_GET_FAILED | root_id={root_order_id} | error={e}")
             return {}
+
+    def get_order_contract_key(self, order_meta):
+        try:
+            if not isinstance(order_meta, dict):
+                return None
+            exchange = str(order_meta.get("exchange", "")).strip().upper()
+            symbol = self.get_retry_pricing_symbol(order_meta.get("symbol", ""))
+            symbol = str(symbol).strip().upper()
+            expiry = self.to_yyyymmdd(order_meta.get("expiry", ""))
+            right = str(order_meta.get("right", "")).strip().upper()
+            strike = float(order_meta.get("strike"))
+            if exchange not in ("NSEFO", "BSEFO") or symbol not in ("NIFTY", "SENSEX") or not expiry or right not in ("CE", "PE"):
+                return None
+            strike_text = str(int(strike)) if strike.is_integer() else str(strike)
+            return "|".join((exchange, symbol, expiry, strike_text, right))
+        except Exception:
+            return None
+
+    def register_unsettled_order(self, root_order_id, order_meta):
+        root_key = str(root_order_id).strip()
+        contract_key = self.get_order_contract_key(order_meta)
+        if not root_key or not contract_key:
+            return
+        with StratX.retry_state_lock:
+            unsettled = StratX.retry_state.setdefault("unsettled_by_root", {})
+            if unsettled.get(root_key) == contract_key:
+                return
+            unsettled[root_key] = contract_key
+            StratX.retry_state_dirty = True
+        printt(f"STRATX_ORDER_UNSETTLED | root_id={root_key} | contract={contract_key}")
+
+    def clear_unsettled_order(self, root_order_id, reason):
+        root_key = str(root_order_id).strip()
+        if not root_key:
+            return False
+        with StratX.retry_state_lock:
+            unsettled = StratX.retry_state.setdefault("unsettled_by_root", {})
+            contract_key = unsettled.pop(root_key, None)
+            if contract_key is None:
+                return False
+            StratX.retry_state_dirty = True
+        printt(f"STRATX_ORDER_SETTLED | root_id={root_key} | contract={contract_key} | reason={reason}")
+        return True
+
+    def settle_unsettled_traded_roots(self, traded_by_root):
+        if not isinstance(traded_by_root, dict):
+            return
+        for root_order_id, traded_quantity in traded_by_root.items():
+            if int(float(traded_quantity or 0)) > 0:
+                self.clear_unsettled_order(root_order_id, "traded")
+
+    def get_unsettled_contracts(self):
+        with StratX.retry_state_lock:
+            unsettled = StratX.retry_state.get("unsettled_by_root", {})
+            if not isinstance(unsettled, dict):
+                return set()
+            return {str(contract_key) for contract_key in unsettled.values() if str(contract_key).strip()}
 
     def register_reference_root_id(self, future, reference_id):
         try:
@@ -1871,6 +1960,7 @@ class StratX:
                 root_order_id = StratX.future_root_ids.pop(future, None)
                 net_meta = StratX.future_net_meta.pop(future, None)
             if root_order_id and isinstance(net_meta, dict):
+                self.clear_unsettled_order(root_order_id, "http_failed")
                 self.release_stratx_net(
                     root_order_id,
                     net_meta.get("bucket"),
@@ -2416,6 +2506,8 @@ class StratX:
             if reconciliation_key:
                 order_meta["reconciliation_key"] = str(reconciliation_key)
             self.register_order_meta(root_order_id, order_meta)
+            if is_new_root_order and not reconciliation_key:
+                self.register_unsettled_order(root_order_id, order_meta)
 
             order_info = {
                 "client_ids": payload_client_ids,
@@ -2486,6 +2578,8 @@ class StratX:
             return [future]
 
         except Exception as e:
+            if root_order_id is not None and (isinstance(reserved_net_meta, dict) or isinstance(net_meta, dict)):
+                self.clear_unsettled_order(root_order_id, "submit_failed")
             if reserved_net_meta and not submitted_future:
                 try:
                     self.rollback_stratx_net_meta(reserved_net_meta, "stratx_submit_exception")

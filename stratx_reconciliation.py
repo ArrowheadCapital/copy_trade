@@ -143,6 +143,17 @@ class StratXReconciliation:
         return stat.st_mtime_ns, stat.st_size
 
     def read_source(self, path, separator, max_retries=3):
+        if not path or not os.path.exists(path):
+            self.source_cache.pop(path, None)
+            return None, False, None
+        try:
+            if os.path.getsize(path) == 0:
+                self.source_cache.pop(path, None)
+                return None, False, None
+        except FileNotFoundError:
+            self.source_cache.pop(path, None)
+            return None, False, None
+
         try:
             signature = self.file_signature(path)
             cached = self.source_cache.get(path)
@@ -163,6 +174,9 @@ class StratXReconciliation:
                 if cache_signature is None:
                     printt(f"STRATX_RECON_SOURCE_CHANGED | path={path} | action=use_snapshot_without_cache")
                 return frame, True, cache_signature
+            except pd.errors.EmptyDataError:
+                self.source_cache.pop(path, None)
+                return None, False, None
             except Exception as e:
                 if attempt < max_retries - 1:
                     time.sleep(0.1 * (attempt + 1))
@@ -401,6 +415,11 @@ class StratXReconciliation:
             return False
 
     def _submit_correction(self, contract_key, difference):
+        correction_start_ts = time.perf_counter()
+        timing_ctx = {
+            "worker_dequeue_ts": correction_start_ts,
+            "broker_entry_ts": correction_start_ts,
+        }
         exchange, symbol, expiry, strike, right = self.parse_contract_key(contract_key)
         side = "BUY" if difference > 0 else "SELL"
         quantity = abs(int(difference))
@@ -420,19 +439,18 @@ class StratXReconciliation:
             return False
 
         cache_symbol = self.broker.build_cache_symbol(symbol, self.broker.to_ddmmmyy(expiry), strike, right)
+        price_start_ts = time.perf_counter()
         price = self.broker.price_from_avg_ltp_or_fallback(side=side, tick_size=tick_size, cache_symbol=cache_symbol)
-        if price is None or float(price) <= 0:
-            printt(f"STRATX_RECON_CORRECTION_SKIPPED | contract={contract_key} | reason=price_unavailable")
-            return False
+        timing_ctx["price_calc_ms"] = (time.perf_counter() - price_start_ts) * 1000
 
         payload_symbol = self.broker.get_retry_payload_symbol(symbol, exchange)
-        orders = self.broker.place_stratx_single_order(self.order_url, self.strategy_name, payload_symbol, strike, expiry, side, quantity, price, exchange, "NFO-OPT" if exchange == "NSEFO" else "BFO-OPT", right, freeze_quantity, lot_size=lot_size, client_ids=[], description=description, reconciliation_key=contract_key)
+        orders = self.broker.place_stratx_single_order(self.order_url, self.strategy_name, payload_symbol, strike, expiry, side, quantity, price, exchange, "NFO-OPT" if exchange == "NSEFO" else "BFO-OPT", right, freeze_quantity, lot_size=lot_size, csv_read_ts=correction_start_ts, timing_ctx=timing_ctx, client_ids=[], description=description, reconciliation_key=contract_key)
         if not orders:
             printt(f"STRATX_RECON_CORRECTION_SKIPPED | contract={contract_key} | reason=placement_not_submitted")
             return False
         return True
 
-    def compare_positions(self, desired, actual, valid_exchanges):
+    def compare_positions(self, desired, actual, valid_exchanges, unsettled_contracts):
         all_contracts = set(desired) | set(actual)
         active_contracts = {
             contract_key
@@ -448,6 +466,7 @@ class StratXReconciliation:
             now = time.time()
             with self.state_lock:
                 is_pending = contract_key in self.pending
+                is_unsettled = contract_key in unsettled_contracts
                 cooldown_until = float(self.cooldowns.get(contract_key, 0))
                 if cooldown_until and cooldown_until <= now:
                     self.cooldowns.pop(contract_key, None)
@@ -457,6 +476,8 @@ class StratXReconciliation:
                 if is_pending or cooldown_until > now or difference == 0:
                     self.confirmations.pop(contract_key, None)
                     count = 0
+                elif is_unsettled:
+                    count = 0
                 else:
                     previous = self.confirmations.get(contract_key)
                     if previous and previous.get("diff") == difference:
@@ -464,6 +485,10 @@ class StratXReconciliation:
                     else:
                         count = 1
                     self.confirmations[contract_key] = {"diff": difference, "count": count}
+
+            if is_unsettled and difference != 0:
+                printt(f"STRATX_RECON_WAITING_UNSETTLED | contract={contract_key} | desired={desired_qty} | actual={actual_qty} | diff={difference}")
+                continue
 
             if count == 0:
                 continue
@@ -491,7 +516,6 @@ class StratXReconciliation:
 
         desired, valid_exchanges = self.desired_positions()
         if not valid_exchanges:
-            printt("STRATX_RECON_SKIPPED | reason=no_stable_source_snapshot")
             return
 
         actual, traded_by_root = self.actual_positions()
@@ -499,8 +523,9 @@ class StratXReconciliation:
             printt("STRATX_RECON_SKIPPED | reason=traded_fetch_failed")
             return
 
+        self.broker.settle_unsettled_traded_roots(traded_by_root)
         self.settle_traded_corrections(traded_by_root)
-        self.compare_positions(desired, actual, valid_exchanges)
+        self.compare_positions(desired, actual, valid_exchanges, self.broker.get_unsettled_contracts())
 
     def reconciliation_loop(self):
         while True:

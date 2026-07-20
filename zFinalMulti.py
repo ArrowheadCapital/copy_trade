@@ -71,8 +71,8 @@ COPY_SOURCE_ID = str(getattr(cre, "copy_source_id", "")).strip().upper()
 COPY_ALLOWED_DELAY_SECONDS = float(os.getenv("COPY_ALLOWED_DELAY_SECONDS", "0") or 0)
 RECON_INTERVAL_SECONDS = 5
 RECON_REQUIRED_CONFIRMATIONS = 5
-RECON_COOLDOWN_SECONDS = 120
-RECON_REPORT_ONLY = True
+RECON_COOLDOWN_SECONDS = 60
+RECON_REPORT_ONLY = False
 RECON_STATE_FILE = "stratx_recon_state.json"
 
 # Risk limits (commented out for now, can enable later)

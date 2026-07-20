@@ -25,7 +25,7 @@ This README explains the complete project flow and the important functions in th
 | `run.cmd`               | Windows launcher that activates the virtual environment and starts`zzEXE.py`.                                           |
 | `Helper.py`             | Legacy/general helper module used by the runtime for logging and time wait helpers.                                       |
 | `heading.py`            | Small GUI heading text source used by`zzEXE.py`.                                                                        |
-| `state.json`            | StratX retry state file created/updated at runtime.                                                                       |
+| `state.json`            | StratX retry, root/reference, order metadata, and unsettled normal-order state created/updated at runtime.                 |
 | `stratx_net_state.json` | StratX runtime net-position state file created/updated at runtime.                                                        |
 | `stratx_recon_state.json` | StratX pending-correction and cooldown state created/updated at runtime.                                                |
 | `trades.csv`            | Latest orderbook snapshot written by the orderbook polling thread.                                                        |
@@ -132,14 +132,13 @@ The same source-id, option-type, and underlying filters are reused by StratX pos
 Reconciliation settings are intentionally local to `zFinalMulti.py`; they are not added to `credentials.py`:
 
 ```python
-RECON_INTERVAL_SECONDS = 30
-RECON_REQUIRED_CONFIRMATIONS = 3
-RECON_COOLDOWN_SECONDS = 120
-RECON_REPORT_ONLY = True
+RECON_INTERVAL_SECONDS = 5
+RECON_REQUIRED_CONFIRMATIONS = 5
+RECON_COOLDOWN_SECONDS = 60
 RECON_STATE_FILE = "stratx_recon_state.json"
 ```
 
-`RECON_REPORT_ONLY` defaults to `True`. In this mode the system calculates and confirms mismatches but does not submit correction orders. Change it to `False` only after validating report-only logs with live trading data.
+`RECON_REPORT_ONLY` controls rollout behavior: when true, confirmed mismatches are logged but correction orders are not submitted.
 
 ### Broker Selection
 
@@ -592,11 +591,28 @@ This is a safety net in case a file event is missed.
 
 StratX reconciliation compares the full current-day source position with the TRADED position of reference client `STRATX_NET_CLIENT_ID` (normally `Y05601`). It runs independently from live file detection and order workers.
 
+### Reconciliation Cycle
+
+Each cycle follows this order:
+
+1. Return without doing reconciliation when the market is closed.
+2. Read or reuse the cached NSE and BSE source snapshots and build the transformed desired net position for each exact option contract.
+3. Skip an exchange whose source file is missing, empty, or unreadable; that exchange is not interpreted as having a zero desired position.
+4. Fetch the reference client's current TRADED order rows and aggregate the actual net position.
+5. Settle normal copied orders and pending corrections whose root quantities are now present as TRADED.
+6. Compare desired and actual positions independently for every active contract.
+7. Freeze correction confirmation while a normal order for that contract is unsettled, or suppress it while a correction is pending or in cooldown.
+8. After the configured consecutive confirmations, calculate a fresh price and submit the difference through the normal StratX placement pipeline.
+
+The loop targets one cycle every `RECON_INTERVAL_SECONDS`, including the work performed in that cycle. For example, with a 5-second interval, if reading, fetching, and comparison take 1.2 seconds, the loop sleeps for approximately 3.8 seconds. If the work itself takes at least the full interval, the next cycle starts immediately.
+
 ### Desired Position
 
-The reconciliation manager reads stable snapshots of the current NSE and BSE source files. It checks file size and modification time before and after each read; a file that changes during reading is skipped for that cycle.
+The reconciliation manager reads current snapshots of the NSE and BSE source files. If a file changes during reading, the successfully read snapshot is used without caching and the next cycle reads the file again.
 
-Unchanged source files reuse a cached desired-position calculation. This avoids reparsing full files on every 30-second reconciliation cycle.
+Unchanged source files reuse a cached desired-position calculation. This avoids reparsing full files on every configured reconciliation cycle.
+
+A missing, empty, or unreadable NSE/BSE source file is treated as unavailable for that exchange. It is not treated as a zero desired position, so existing actual positions are not incorrectly closed. Other available exchanges continue normally. When at least one exchange is available and comparison proceeds, confirmations belonging to an unavailable exchange are cleared; when neither exchange is available, the cycle returns without comparison.
 
 Selected source rows are transformed using the same relevant StratX rules:
 
@@ -634,9 +650,19 @@ For each exact contract:
 difference = desired net - actual net
 ```
 
-The same non-zero difference must appear in three consecutive successful checks. A changed difference restarts confirmation at one; a zero difference clears it. Failed source reads and failed StratX report fetches do not increase confirmation counts. A successfully read source snapshot is used even if the file is updated during that read; that snapshot is not cached, so the next cycle reads the file again.
+The same non-zero difference must appear for the configured number of consecutive successful checks. A changed difference restarts confirmation at one; a zero difference clears it. If comparison proceeds for another available exchange, an unavailable source exchange's confirmations are cleared. A failed StratX report fetch skips the complete comparison and preserves existing confirmation counts without increasing them. A successfully read source snapshot is used even if the file is updated during that read; that snapshot is not cached, so the next cycle reads the file again.
 
-Each contract is tracked independently, so differences in multiple instruments are confirmed and corrected separately. Correction orders use the existing StratX order executor and the same placement pipeline as live orders. Reconciliation checks continue even while new NSE or BSE input is being processed; the three consecutive confirmations protect against temporary differences.
+Each contract is tracked independently, so differences in multiple instruments are confirmed and corrected separately. Correction orders use the existing StratX order executor and the same placement pipeline as live orders. Reconciliation checks continue even while new NSE or BSE input is being processed; consecutive confirmations protect against temporary differences.
+
+### Unsettled Normal Orders
+
+A new normal copied order is recorded in `state.json` under its root id and exact reconciliation contract key. It remains unsettled through its original HTTP request and any orderbook retry. Reconciliation freezes the contract's existing confirmation count and does not place a correction while a normal order or retry for that exact contract is unsettled. After all normal roots settle, an unchanged difference continues from the frozen count, a changed difference restarts from one, and a zero difference clears confirmation.
+
+The unsettled root is cleared when the reference client is found as TRADED, when all HTTP attempts finally fail, or when a cancelled/rejected order reaches final retry failure. A TRADED order keeps its reserved net; a final failure clears the unsettled root and releases reserved net. On the next successful comparison, confirmation continues only if the final difference is unchanged; otherwise it restarts from one or clears when positions match. Correction orders are not added to this mapping because their lifecycle is already protected by reconciliation's pending state.
+
+On restart, an unsettled root without any saved reference-id mapping is cleared because it cannot be matched to a future orderbook row. Startup first rebuilds actual net from traded orders, and any remaining mismatch must still pass the normal consecutive reconciliation confirmations before a correction can be submitted. Unsettled roots that have a saved reference mapping remain protected and settle through the normal traded or terminal-failure flow.
+
+This guard prevents a normal CANCEL/REJECT retry and reconciliation from both replacing the same missing trade. It uses only an in-memory locked lookup on the live path and does not add an HTTP call or wait to order placement.
 
 ### Correction Placement
 
@@ -662,11 +688,13 @@ Once a correction is submitted, its exact contract is marked pending. Confirmati
 
 The existing retry policy remains authoritative. Reconciliation does not create a second retry mechanism. A retryable cancellation or PRICE/LPP rejection remains under the same correction root and does not reserve net again.
 
-When the correction quantity appears in the reference client's TRADED report, pending state is cleared and the contract enters a 120-second cooldown. On final failure, existing code releases reserved net, reconciliation clears pending state, starts cooldown, and requires three new confirmations before another correction.
+When the complete submitted correction quantity appears under its root in the reference client's TRADED report, pending state is cleared and the contract enters the configured cooldown. On final failure, existing code releases reserved net and reconciliation clears pending state and starts cooldown. After cooldown expires, any remaining mismatch must pass a fresh set of confirmations before another correction.
 
 ### Reconciliation State Persistence
 
 Only pending corrections and unexpired cooldowns are stored in `stratx_recon_state.json`. Confirmation counts are intentionally not persisted and restart from zero after application restart.
+
+Normal unsettled roots are stored in the existing `state.json` retry state so the retry-versus-reconciliation guard survives an application restart.
 
 The saver follows the same pattern as the existing retry and net-state savers:
 
@@ -680,12 +708,14 @@ state change
 
 A daemon saver checks dirty state every second, critical correction transitions are saved immediately, and GUI shutdown requests one final save. State from a previous trading date is discarded. Restored pending corrections remain blocked until their saved root/reference can be resolved as traded or finally failed.
 
+Retry-state and net-state file writes use separate save locks around their temporary-file write and atomic replacement. Their in-memory locks are held only while taking a snapshot, so disk I/O does not block live net reservation or order submission.
+
 ### Reconciliation Logs
 
 Report-only mismatch example:
 
 ```text
-STRATX_RECON_MISMATCH | contract=NSEFO|NIFTY|20260714|24350|CE | desired=195 | actual=130 | diff=65 | action=BUY 65 | confirmation=2/3 | report_only=True
+STRATX_RECON_MISMATCH | contract=NSEFO|NIFTY|20260714|24350|CE | desired=195 | actual=130 | diff=65 | action=BUY 65 | confirmation=2/5 | report_only=True
 ```
 
 Correction lifecycle logs include:
