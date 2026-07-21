@@ -1380,8 +1380,10 @@ Before building the payload, StratX checks whether an option order is ITM using 
 
 * NIFTY options use `cache:LTP_NIFTY 50`
 * SENSEX/BSX options use `cache:LTP_SENSEX`
-* CE is skipped when `strike < underlying LTP`
-* PE is skipped when `strike > underlying LTP`
+* spot is rounded to the nearest valid strike, with an exact midpoint rounded upward
+* NIFTY uses a 50-point strike step and SENSEX/BSX uses a 100-point strike step
+* CE is allowed up to two strike steps below ATM; anything deeper ITM is skipped
+* PE is allowed up to two strike steps above ATM; anything deeper ITM is skipped
 * if fresh underlying LTP is unavailable from all Redis sources, the ITM check is skipped and the order continues
 
 Important payload fields:

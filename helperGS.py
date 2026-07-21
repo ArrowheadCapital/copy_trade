@@ -2108,7 +2108,12 @@ class StratX:
                 return False
 
             normalized_symbol = self.get_retry_pricing_symbol(symbol)
-            if normalized_symbol not in ("NIFTY", "NIFTY 50", "SENSEX"):
+
+            if normalized_symbol in ("NIFTY", "NIFTY 50"):
+                strike_step = 50
+            elif normalized_symbol in ("SENSEX", "BSX"):
+                strike_step = 100
+            else:
                 return False
 
             underlying_price = self.get_underlying_ltp_for_symbol(normalized_symbol)
@@ -2117,20 +2122,19 @@ class StratX:
                 return False
 
             strike_price = float(strike)
+            atm_strike = int((underlying_price + strike_step / 2) // strike_step) * strike_step
 
-            if option_type == "CE" and strike_price < underlying_price:
-                printt(
-                    f"Skipping Order Placement as strike price is less than underlying price (ITM) "
-                    f"for CE {strike_price} < {underlying_price}"
-                )
-                return True
+            if option_type == "CE":
+                minimum_allowed_strike = atm_strike - (2 * strike_step)
+                if strike_price < minimum_allowed_strike:
+                    printt(f"Skipping CE beyond 2 ITM offsets | symbol={normalized_symbol} | spot={underlying_price} | atm={atm_strike} | strike={strike_price}")
+                    return True
 
-            if option_type == "PE" and strike_price > underlying_price:
-                printt(
-                    f"Skipping Order Placement as strike price is greater than underlying price (ITM) "
-                    f"for PE {strike_price} > {underlying_price}"
-                )
-                return True
+            elif option_type == "PE":
+                maximum_allowed_strike = atm_strike + (2 * strike_step)
+                if strike_price > maximum_allowed_strike:
+                    printt(f"Skipping PE beyond 2 ITM offsets | symbol={normalized_symbol} | spot={underlying_price} | atm={atm_strike} | strike={strike_price}")
+                    return True
 
             return False
         except Exception as e:
