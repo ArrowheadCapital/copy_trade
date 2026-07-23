@@ -11,9 +11,9 @@ import credentials as cre
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from fetch_circuit import get_circuit_limits, get_ltp_avg, get_underlying_ltp
-from async_logger import createLogFile as async_create_log_file
-from async_logger import printt as async_printt
+from src.utils.fetch_circuit import get_underlying_ltp
+from src.utils.broker_helpers import printt
+from src.utils.order_pricing import build_cache_symbol, price_from_avg_ltp_or_fallback
 
 urll = getattr(cre, "urll", None)
 username = getattr(cre, "username", None)
@@ -31,433 +31,12 @@ finniftyFreeze = getattr(cre, "finnifty", None)
 iprocli = getattr(cre, "iprocli", None)
 AccountNumber = getattr(cre, "AccountNumber", None)
 
-# =========================== COMMON FUNCTIONS ==================================
-greek_rate_lock = threading.Lock()
-greek_order_timestamps = deque()
-MAX_GREEK_ORDERS_PER_SEC = 9
-log_lock = threading.Lock()
-
-
-def wait_for_greek_order_slot():
-    while True:
-        with greek_rate_lock:
-            now = time.time()
-
-            while greek_order_timestamps and now - greek_order_timestamps[0] >= 1:
-                greek_order_timestamps.popleft()
-
-            if len(greek_order_timestamps) < MAX_GREEK_ORDERS_PER_SEC:
-                greek_order_timestamps.append(now)
-                return
-
-            wait_time = 1 - (now - greek_order_timestamps[0])
-            printt(f"RATE LIMIT HIT | waiting {wait_time:.3f}s")
-
-        time.sleep(max(wait_time, 0.01))
-
-def getOrderStatus(orderId):
-        try:
-            if orderId == 0:
-                return('Order Data not avaiable..!')
-
-            for i in range(10):
-                try:
-                    df = pd.read_csv('trades.csv')
-                    res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')[0]
-                    return res
-                except Exception as e:
-                    printt('Error Order()_orderStatus :- ',e,i)
-                    time.sleep(1)
-        except Exception as e:
-            printt(f"Error in getOrderStatus: {e}")
-            return None
-
-def printt(*args, **kwargs):
-    async_printt(*args, **kwargs)
-
-def saveInLogFile(*args, **kwargs):
-    async_printt(*args, **kwargs)
-
-def createLogFile():
-    async_create_log_file()
-
-def getFreezeQua(freeze_limit, lot_size, total_quantity):
-    try:
-        total_quantity = int(total_quantity)
-        result = []
-        while total_quantity > 0:
-            qty = min(total_quantity, int(freeze_limit))
-            qty = (qty // int(lot_size)) * int(lot_size)
-            if qty == 0:
-                break
-            result.append(qty)
-            total_quantity -= qty
-        return result
-    except Exception as e:
-        printt(f"Error in getFreezeQua: {e}")
-        return []
-
-def round_to_tick(price: float, tick: float) -> float:
-    return round(tick * round(price / tick), 2)
-
-def adjust_price_to_tick(price, tick_size, side, market_order_offset):
-    offset = price * (market_order_offset / 100)
-
-    if price <= 50:
-        offset = market_order_offset
-
-    if side == "BUY":
-        price += offset
-    else:
-        price = max(tick_size, price - offset)
-
-    return round_to_tick(price, tick_size)
-
-
-# =========================== GREEKSOFT API ==================================
-
-class greeksoft():
-    def __init__(self):
-        global username
-        global pw
-        for i in range(4):
-            try:
-                url = f"{authurl}/auth/greek/sessiontoken"
-                data = {
-                    "username": username,
-                    "password": pw,
-                    "validFor": "10d"
-                }
-                response = requests.post(url, json=data)
-
-                session_token = response.json().get("sessionToken")
-                self.session_token = session_token
-                printt(f"Session Token Created")
-                self.getInstrument()
-                self.login()
-                printt(f"Master Copy Downloaded..!")
-                break
-            except Exception as e:
-                printt(f'Error in generating session token : {e}, retrying...')
-                time.sleep(2)
-
-
-    def login(self):
-        try:
-            global urll
-            global username
-            url = f"http://{urll}/getLoginInfo"
-            headers = {
-                "Authorization": self.session_token
-            }
-
-            # Request body
-            data = {
-                "request": {
-                    "svcVersion": "1.0.0",
-                    "svcGroup": "Login",
-                    "svcName": "getLoginInfo",
-                    "assetType": "",
-                    "data": {
-                        "gscid": username
-                    }
-                }
-            }
-
-            response = requests.post(url, json=data, headers=headers)
-            data = response.json()
-            self.gcid = str(data['response']['data']['gcid'])
-            return(response.json())
-        except Exception as e:
-            printt(f"Error in login: {e}, {data}")
-            return None
-
-
-    def getInstrument(self):
-        try:
-            global urll
-            url = f"http://{urll}/getAllContract"
-            authorization_string = self.session_token
-
-            # Headers with Authorization
-            headers = {
-                "Authorization": authorization_string
-            }
-            # Make the GET request
-            response = requests.get(url, headers=headers)
-
-            raw_data = response.text.strip()
-
-            # Convert to a Pandas DataFrame
-            df = pd.read_csv(StringIO(raw_data))
-            df = df.reset_index()
-            df.to_csv('abc.csv', index=False)
-            # df.columns = ['GreekToken', 'ExchangeToken', 'ExchangeSegMent', 'Series/InstType',
-            # 'Symbol', 'Description', 'ExpiryDate', 'OptionType', 'StrikePrice',
-            # 'TickSize', 'LotSize', 'TradingSymbol', 'SymbolWithExpiry']
-            self.df = df
-            return(df)
-        except Exception as e:
-            printt(f"Error in getInstrument: {e}")
-            return None
-
-
-    def getData(self,t):
-        try:
-            d = self.df
-            filtered_df = d[d['ExpiryDate'].str.contains(t[4], case=False, na=False)]
-            filtered_df = filtered_df[filtered_df['Symbol'] == t[3].replace(' ','')]
-            filtered_df = filtered_df[filtered_df['StrikePrice'] == float(t[5])]
-            filtered_df = filtered_df[filtered_df['OptionType'].str.contains(t[6], case=False, na=False)]
-            return(filtered_df.iloc[0])
-        except Exception as e:
-            printt(f"Error in getData: {e}")
-            return None
-
-
-    def getDataBSE(self,t):
-        try:
-            filtered_df = self.df
-            filtered_df = filtered_df[filtered_df['ExchangeToken'] == int(t)]
-            return(filtered_df.iloc[0])
-        except Exception as e:
-            printt(f"Error in getDataBSE: {e}")
-            return None
-
-
-    def placeOrderBSE(self,gtoken,side,name,lot,qua,dt):
-        try:
-            global multiplier
-            global urll
-            global username
-
-            global sensexFreeze
-            global bankex
-
-            if name.upper() == 'BANKEX':
-                freez = bankex
-            elif name.upper() == 'SENSEX':
-                freez = sensexFreeze
-
-            if side == 'Buy':
-                si = 1
-            elif side == 'Sell':
-                si = 2
-
-            url = f"http://{urll}/NewOrderRequest"
-            headers = {
-                "Authorization": self.session_token
-            }
-
-            quas = getFreezeQua(freez, dt.LotSize, int(qua * multiplier))
-            lots = [x / int(dt.LotSize) for x in quas]
-
-            idds = []
-
-            for i in range(len(quas)):
-                qua = quas[i]
-                lot = lots[i]
-
-                for i in range(1):
-                    try:
-                        # Request body
-                        data = {
-                            "request": {
-                                "data": {
-                                "trigger_price": "0",
-                                "gtoken": str(gtoken),
-                                "side": str(si),
-                                "gcid": self.gcid,
-                                "validity": "0",
-                                "price": "0",
-                                "exchange": "BSE",
-                                "disclosed_qty": "0",
-                                "tradeSymbol": str(name.upper()),
-                                "lot": str(lot),
-                                "order_type": "2",
-                                "product": "0",
-                                "qty": str(qua),
-                                "corderid": "3",
-                                "amo": "0",
-                                "iprocli": iprocli,
-                                "AccountNumber": AccountNumber,
-                                "gtdExpiry": 0,
-                                "is_post_closed": "0",
-                                "is_preopen_order": "0",
-                                "isSqOffOrder": "false",
-                                "offline": "0",
-                                "is_restapi":"1",
-                                "strategyName": "AlgoSelf"
-                                },
-                                "response_format": "json",
-                                "request_type": "subscribe",
-                                "streaming_type": "NewOrderRequest"
-                            }
-                        }
-
-                        wait_for_greek_order_slot()
-                        response = requests.post(url, json=data, headers=headers)
-                        d = response.json()
-                        printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
-                        idds.append(d['response']['data']['gorderid'])
-                        break
-                    except Exception as e:
-                        printt(d, f"Retrying orderPlacing in 1 Sec | Error: {e}", i)
-                        time.sleep(1)
-
-            return(idds)
-        except Exception as e:
-            printt(f"Error in placeOrderBSE: {e}")
-            return []
-
-
-    def placeOrder(self,gtoken,side,name,lot,qua,dt):
-        try:
-            global multiplier
-            global urll
-            global username
-
-            global niftyFreeze
-            global bnfFreeze
-            global midcpniftyFreeze
-            global finniftyFreeze
-
-            if name.upper() == 'NIFTY':
-                freez = niftyFreeze
-            elif name.upper() == 'BANKNIFTY':
-                freez = bnfFreeze
-            elif name.upper() == 'MIDCPNIFTY':
-                freez = midcpniftyFreeze
-            elif name.upper() == 'FINNIFTY':
-                freez = finniftyFreeze
-
-            quas = getFreezeQua(freez, dt.LotSize, int(qua * multiplier))
-            lots = [x / int(dt.LotSize) for x in quas]
-
-            url = f"http://{urll}/NewOrderRequest"
-            headers = {
-                "Authorization": self.session_token
-            }
-
-            idds = []
-
-            for i in range(len(quas)):
-                qua = quas[i]
-                lot = lots[i]
-
-                for i in range(1):
-                    try:
-                    # Request body
-                        data = {
-                            "request": {
-                                "data": {
-                                "trigger_price": "0",
-                                "gtoken": str(gtoken),
-                                "side": str(side),
-                                "gcid": self.gcid,
-                                "validity": "0",
-                                "price": "0",
-                                "exchange": "NSE",
-                                "disclosed_qty": "0",
-                                "tradeSymbol": str(name.upper()),
-                                "lot": str(lot),
-                                "order_type": "2",
-                                "product": "0",
-                                "qty": str(qua),
-                                "corderid": "3",
-                                "amo": "0",
-                                "iprocli": iprocli,
-                                "AccountNumber": AccountNumber,
-                                "gtdExpiry": 0,
-                                "is_post_closed": "0",
-                                "is_preopen_order": "0",
-                                "isSqOffOrder": "false",
-                                "offline": "0",
-                                "is_restapi":"1",
-                                "strategyName": "AlgoSelf"
-                                },
-                                "response_format": "json",
-                                "request_type": "subscribe",
-                                "streaming_type": "NewOrderRequest"
-                            }
-                        }
-
-                        wait_for_greek_order_slot()
-                        response = requests.post(url, json=data, headers=headers)
-                        d = response.json()
-                        printt(f"{d['response']['svcName']} , {d['response']['data']['gscid']} , {d['response']['data']['gorderid']}")
-                        idds.append(d['response']['data']['gorderid'])
-                        break
-                    except Exception as e:
-                        printt(d, f"Retrying orderPlacing in 1 Sec | Error: {e}", i)
-                        time.sleep(1)
-
-            return(idds)
-        except Exception as e:
-            printt(f"Error in placeOrder: {e}")
-            return []
-
-
-    def getOrderStatus(self,orderId):
-        try:
-            if not orderId:
-                return None
-
-            for i in range(10):
-                try:
-                    df = pd.read_csv('trades.csv')
-                    res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')
-                    if res:
-                        return res[0]
-                    time.sleep(2)
-                except Exception as e:
-                    printt(f"Greeksoft order status retry {i}: {e}")
-                    time.sleep(2)
-
-            printt(f"No order update for orderId {orderId}")
-            return None
-
-        except Exception as e:
-            printt(f"Error in Greeksoft getOrderStatus: {e}")
-            return None
-
-
-    def getOrderBookALL(self):
-        try:
-            for i in range(10):
-
-                global urll
-                global username
-
-                url = f"http://{urll}/getOrderBookDetailWithLegV2?exchangeType=ALL&ClientCode={self.gcid}&Order_Status=ALL&Ordertype=All&gscid={username}"
-
-                headers = {
-                    "Authorization": self.session_token
-                }
-
-                try:
-                    response = requests.get(url,headers=headers)
-                    d = response.json()
-                    return(d)
-                except Exception as e:
-                    try:
-                        printt(d,'Retrying order status in one sec',i)
-                        time.sleep(1)
-                    except Exception as e:
-                        printt('Error in order status, Retrying',i)
-                        time.sleep(1)
-        except Exception as e:
-            printt(f"Error in getOrderBookALL: {e}")
-            return None
-
-
 # =========================== STRATX API ==================================
 
 class StratX:
 
     inst_df = None
     inst_df_lock = threading.Lock()
-    market_order_offset = 8
     tick_size_by_name = {}
     lot_size_by_name = {}
     bse_contract_by_exchange_id = {}
@@ -467,8 +46,6 @@ class StratX:
     expiry_ddmmmyy_cache = {}
     expiry_cache_lock = threading.Lock()
     instrument_names_to_load = {"NIFTY", "SENSEX"}
-    redis_ltp_avg_cache = {}
-    redis_ltp_avg_cache_ttl = 0.2
     redis_underlying_ltp_cache = {}
     redis_underlying_ltp_cache_ttl = 0.2
     stratx_order_workers = 20
@@ -1627,118 +1204,6 @@ class StratX:
             return None, None, None, None, None, None
 
 
-    def apply_circuit_clamp(self, price, cache_symbol):
-        try:
-            if not cache_symbol:
-                return price
-
-            limits = get_circuit_limits(cache_symbol)
-            if not limits:
-                return price
-
-            uc = limits.get("UC")
-            lc = limits.get("LC")
-            ts = limits.get("ts")
-            if uc is None or lc is None or ts is None:
-                return price
-
-            uc = float(uc)
-            lc = float(lc)
-
-            try:
-                tick_time = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S.%f").timestamp()
-            except Exception:
-                tick_time = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S").timestamp()
-
-            if time.time() - tick_time > 300:
-                return price
-
-            if price > uc:
-                return uc
-            if price < lc:
-                return lc
-            return price
-        except Exception as e:
-            printt(f"Error in apply_circuit_clamp: {e}")
-            return price
-
-
-    def build_cache_symbol(self, name, expiry, strike, right):
-        try:
-            strike_val = float(strike)
-            if strike_val.is_integer():
-                strike_str = str(int(strike_val))
-            else:
-                strike_str = str(strike).strip()
-            return f"{str(name).strip().upper()}{str(expiry).strip().upper()}{strike_str}{str(right).strip().upper()}"
-        except Exception:
-            return None
-
-
-    def get_redis_ltp_avg(self, cache_symbol):
-        try:
-            tt0 = time.perf_counter()
-            cache_key = str(cache_symbol).strip().upper()
-            cached = StratX.redis_ltp_avg_cache.get(cache_key)
-            if cached is not None:
-                cached_at, cached_result = cached
-                if tt0 - cached_at <= StratX.redis_ltp_avg_cache_ttl:
-                    return cached_result
-
-            data = get_ltp_avg(cache_key)
-            if not data:
-                return 0, 0
-
-            result = (data["ltp"], data["avg"])
-            StratX.redis_ltp_avg_cache[cache_key] = (time.perf_counter(), result)
-            return result
-        except Exception as e:
-            printt(f"Redis tick read error ({cache_symbol}): {e}")
-            return 0, 0
-
-
-    def price_from_avg_ltp_or_fallback(self, side, tick_size, cache_symbol=None):
-        try:
-            if cache_symbol:
-                ltp, avg = self.get_redis_ltp_avg(cache_symbol)
-
-                if ltp == 0 and avg == 0:
-                    return 0
-
-                if ltp is not None:
-                    offset_ltp = ltp * (self.market_order_offset / 100)
-                    if ltp <= 50:
-                        offset_ltp = self.market_order_offset
-
-                    offset_avg = None
-                    if avg is not None:
-                        offset_avg = avg * (self.market_order_offset / 100)
-                        if avg <= 50:
-                            offset_avg = self.market_order_offset
-
-                    if avg is None:
-                        if str(side).upper() == "BUY":
-                            raw = ltp + offset_ltp
-                        else:
-                            raw = max(float(tick_size), ltp - offset_ltp)
-                    elif str(side).upper() == "BUY":
-                        raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
-                    else:
-                        raw = (ltp - offset_ltp) if (avg - offset_avg >= ltp) else (avg - offset_avg)
-                        raw = max(float(tick_size), raw)
-
-                    price = round_to_tick(raw, float(tick_size))
-                    if price <= 0:
-                        price = float(tick_size)
-                    price = self.apply_circuit_clamp(price, cache_symbol)
-                    return price
-
-            return 0
-        except Exception as e:
-            printt(f"Error in price_from_avg_ltp_or_fallback: {e}")
-            return 0
-
-
     def get_otm_strike(self, symbol, right, strike, offset):
         try:
             sym = str(symbol).strip().upper()
@@ -1849,9 +1314,9 @@ class StratX:
             cache_symbol = None
             if right in ("CE", "PE") and strike is not None:
                 expiry_ddmmmyy = self.to_ddmmmyy(expiry)
-                cache_symbol = self.build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
+                cache_symbol = build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
 
-            new_price = self.price_from_avg_ltp_or_fallback(
+            new_price = price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
                 cache_symbol=cache_symbol,
@@ -2246,10 +1711,10 @@ class StratX:
             cache_symbol = None
             if right in ("CE", "PE") and strike is not None:
                 expiry_ddmmmyy = self.to_ddmmmyy(expiry)
-                cache_symbol = self.build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
+                cache_symbol = build_cache_symbol(pricing_symbol, expiry_ddmmmyy, strike, right)
 
             _t0 = time.perf_counter()
-            price = self.price_from_avg_ltp_or_fallback(
+            price = price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
                 cache_symbol=cache_symbol,
@@ -2644,10 +2109,10 @@ class StratX:
                 expiry = self.to_ddmmmyy(trade[4])
                 right_tmp = str(trade[6]).strip().upper()
                 strike_tmp = float(trade[5])
-                cache_symbol = self.build_cache_symbol(name, expiry, strike_tmp, right_tmp)
+                cache_symbol = build_cache_symbol(name, expiry, strike_tmp, right_tmp)
 
             _t0 = time.perf_counter()
-            price = self.price_from_avg_ltp_or_fallback(
+            price = price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
                 cache_symbol=cache_symbol,
@@ -2684,12 +2149,12 @@ class StratX:
                 #     printt(f"VOLATILITYCORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
                 # else:
                 #     expiry_ddmmmyy = self.to_ddmmmyy(trade[4])
-                #     otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
+                #     otm_cache_symbol = build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
                 #     otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
                 #     if not otm_description:
                 #         raise ValueError(f"VOLATILITYCORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
                 #     _otm_price_t0 = time.perf_counter()
-                #     otm_price = self.price_from_avg_ltp_or_fallback(
+                #     otm_price = price_from_avg_ltp_or_fallback(
                 #         side=side,
                 #         tick_size=tick_size,
                 #         description=otm_description,
@@ -2708,12 +2173,12 @@ class StratX:
                     raise ValueError(f"IMPULSECORE NSE: OTM strike is None | symbol={name} right={right} strike={strike}")
 
                 expiry_ddmmmyy = self.to_ddmmmyy(trade[4])
-                otm_cache_symbol = self.build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
+                otm_cache_symbol = build_cache_symbol(name, expiry_ddmmmyy, otm_strike, right)
                 otm_description = self.get_otm_description(name, expiry_yyyymmdd, right, otm_strike)
                 if not otm_description:
                     raise ValueError(f"IMPULSECORE NSE: OTM description not found | symbol={name} expiry={expiry_yyyymmdd} right={right} strike={otm_strike}")
                 _otm_price_t0 = time.perf_counter()
-                otm_price = self.price_from_avg_ltp_or_fallback(
+                otm_price = price_from_avg_ltp_or_fallback(
                     side=side,
                     tick_size=tick_size,
                     cache_symbol=otm_cache_symbol,
@@ -2777,10 +2242,10 @@ class StratX:
             cache_symbol = None
             if right in ("CE", "PE"):
                 expiry_ddmmmyy = self.to_ddmmmyy(expiry)
-                cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, strike, right)
+                cache_symbol = build_cache_symbol(symbol, expiry_ddmmmyy, strike, right)
 
             _t0 = time.perf_counter()
-            price = self.price_from_avg_ltp_or_fallback(
+            price = price_from_avg_ltp_or_fallback(
                 side=side,
                 tick_size=tick_size,
                 cache_symbol=cache_symbol,
@@ -2812,12 +2277,12 @@ class StratX:
                 #     printt(f"VOLATILITYCORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
                 # else:
                 #     expiry_ddmmmyy = self.to_ddmmmyy(expiry)
-                #     otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
+                #     otm_cache_symbol = build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
                 #     otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
                 #     if not otm_description:
                 #         raise ValueError(f"VOLATILITYCORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
                 #     _otm_price_t0 = time.perf_counter()
-                #     otm_price = self.price_from_avg_ltp_or_fallback(
+                #     otm_price = price_from_avg_ltp_or_fallback(
                 #         side=side,
                 #         tick_size=tick_size,
                 #         description=otm_description,
@@ -2836,12 +2301,12 @@ class StratX:
                     raise ValueError(f"IMPULSECORE BSE: OTM strike is None | symbol={symbol} right={right} strike={strike}")
 
                 expiry_ddmmmyy = self.to_ddmmmyy(expiry)
-                otm_cache_symbol = self.build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
+                otm_cache_symbol = build_cache_symbol(symbol, expiry_ddmmmyy, otm_strike, right)
                 otm_description = self.get_otm_description(symbol, expiry, right, otm_strike)
                 if not otm_description:
                     raise ValueError(f"IMPULSECORE BSE: OTM description not found | symbol={symbol} expiry={expiry} right={right} strike={otm_strike}")
                 _otm_price_t0 = time.perf_counter()
-                otm_price = self.price_from_avg_ltp_or_fallback(
+                otm_price = price_from_avg_ltp_or_fallback(
                     side=side,
                     tick_size=tick_size,
                     cache_symbol=otm_cache_symbol,

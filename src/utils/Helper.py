@@ -11,8 +11,8 @@ import concurrent.futures
 import threading
 import os
 from datetime import timedelta
-from async_logger import createLogFile as async_create_log_file
-from async_logger import printt as async_printt
+from src.utils.async_logger import createLogFile as async_create_log_file
+from src.utils.async_logger import printt as async_printt
 
 importlib.reload(cre)
 lock = threading.Lock()

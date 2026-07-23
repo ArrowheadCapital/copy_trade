@@ -6,7 +6,7 @@ import redis
 import threading
 from dotenv import load_dotenv
 import credentials as cre
-from async_logger import printt
+from src.utils.async_logger import printt
 from redis.backoff import NoBackoff
 from redis.retry import Retry
 

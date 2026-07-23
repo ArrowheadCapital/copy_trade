@@ -1,7 +1,7 @@
 import os
 import threading
 
-from async_logger import printt
+from src.utils.async_logger import printt
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 

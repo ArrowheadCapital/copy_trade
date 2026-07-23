@@ -4,10 +4,11 @@ from pathlib import Path
 
 
 # Put your NSE/BSE trade text file path here.
-INPUT_TXT_PATH = r"\\100.125.204.120\c\Users\admin\Documents\AutoOnlineBackup\BSE\FO\0715AUTOTRD.txt"
+INPUT_TXT_PATH = r"\\100.125.204.120\c\AutoOnlineBackup\BSE\FO\0722AUTOTRD.txt"
+# INPUT_TXT_PATH = r"\\100.125.204.120\c\Users\admin\Documents\AutoOnlineBackup\BSE\FO\0722AUTOTRD.txt"
 
 # Leave blank to create CSV next to the input file with "_grouped.csv" suffix.
-OUTPUT_CSV_PATH = "0715AUTOTRD_grouped_output.csv"
+OUTPUT_CSV_PATH = "0722AUTOTRD_grouped.csv"
 
 
 OUTPUT_FIELDS = [

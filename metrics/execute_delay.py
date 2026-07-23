@@ -1,8 +1,8 @@
 import os
 import pandas as pd
 
-INPUT_CSV = r"\\DESKTOP-CLI5HO6\Desktop\Codes\copy_trade_volatility_core\Trades\20260715.csv"
-OUTPUT_CSV = os.path.join(os.getcwd(), "20260715_latency_volatility.csv")
+INPUT_CSV = r"\\DESKTOP-CLI5HO6\Desktop\Codes\copy_trade_impulse_core\Trades\20260722.csv"
+OUTPUT_CSV = os.path.join(os.getcwd(), "20260722_latency_impulse.csv")
 
 # Read only required columns
 df = pd.read_csv(

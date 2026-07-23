@@ -4,17 +4,17 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Base input signal grouped from original NSE/BSE trade text.
-BASE_GROUPED_CSV = "0715AUTOTRD_grouped.csv"
+BASE_GROUPED_CSV = "0722AUTOTRD_grouped.csv"
 
 # GreekSoft copy-trade grouped output.
-GREEKSOFT_GROUPED_CSV = "0715AUTOTRD_grouped_output.csv"
+GREEKSOFT_GROUPED_CSV = "0722AUTOTRD_grouped_copied.csv"
 
 # StratX latency files.
-STRATX_IMPULSE_CSV = "20260715_latency_impulse.csv"
-STRATX_VOLATILITY_CSV = "20260715_latency_volatility.csv"
+STRATX_IMPULSE_CSV = "20260722_latency_impulse.csv"
+STRATX_VOLATILITY_CSV = "20260722_latency_volatility.csv"
 STRATX_CLIENT_ID = "Y05601"
 
 OUTPUT_CSV = "latency_comparison_Y05601.csv"

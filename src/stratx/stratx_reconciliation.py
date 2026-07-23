@@ -6,7 +6,7 @@ import threading
 import time
 
 import pandas as pd
-from async_logger import printt
+from src.utils.async_logger import printt
 
 
 class StratXReconciliation:
@@ -444,7 +444,7 @@ class StratXReconciliation:
         timing_ctx["price_calc_ms"] = (time.perf_counter() - price_start_ts) * 1000
 
         payload_symbol = self.broker.get_retry_payload_symbol(symbol, exchange)
-        orders = self.broker.place_stratx_single_order(self.order_url, self.strategy_name, payload_symbol, strike, expiry, side, quantity, price, exchange, "NFO-OPT" if exchange == "NSEFO" else "BFO-OPT", right, freeze_quantity, lot_size=lot_size, csv_read_ts=correction_start_ts, timing_ctx=timing_ctx, client_ids=[], description=description, reconciliation_key=contract_key)
+        orders = self.broker.place_stratx_single_order(self.order_url, self.strategy_name, payload_symbol, strike, expiry, side, quantity, price, exchange, "NFO-OPT" if exchange == "NSEFO" else "BFO-OPT", right, freeze_quantity, lot_size=lot_size, csv_read_ts=correction_start_ts, timing_ctx=timing_ctx, client_ids=None, description=description, reconciliation_key=contract_key)
         if not orders:
             printt(f"STRATX_RECON_CORRECTION_SKIPPED | contract={contract_key} | reason=placement_not_submitted")
             return False

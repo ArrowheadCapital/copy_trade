@@ -1,6 +1,6 @@
 import importlib
-import Helper as H
-import helperGS as HG
+from src.utils import Helper as H
+from src import helperGS as HG
 import credentials as cre
 
 import datetime
@@ -11,9 +11,9 @@ import threading
 import pandas as pd
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
-from stratx_reconciliation import StratXReconciliation
+from src.stratx.stratx_reconciliation import StratXReconciliation
 try:
-    from file_watcher import start_file_watcher
+    from src.utils.file_watcher import start_file_watcher
     file_watcher_import_error = None
 except Exception as e:
     start_file_watcher = None
@@ -21,6 +21,8 @@ except Exception as e:
 
 # ================= RELOAD =================
 importlib.reload(H)
+importlib.reload(HG.greeksoft_broker)
+importlib.reload(HG.stratx_broker)
 importlib.reload(HG)
 importlib.reload(cre)
 

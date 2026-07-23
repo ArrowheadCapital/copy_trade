@@ -9,26 +9,40 @@ The project currently supports two broker paths:
 
 This README explains the complete project flow and the important functions in the codebase.
 
-## Files
+## Repository Structure
 
-| File                      | Purpose                                                                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `zFinalMulti.py`        | Main runtime. Reads CSV files, starts workers, queues trades, polls orderbook, and dispatches broker orders.              |
-| `helperGS.py`           | Broker layer. Contains Greeksoft and StratX implementations plus shared helpers.                                          |
-| `stratx_reconciliation.py` | StratX desired-versus-traded position comparison, stable mismatch confirmation, correction lifecycle, and state persistence. |
-| `credentials.py`        | Runtime configuration: broker choice, CSV paths, freeze quantities, API credentials, strategy name, instrument file path. |
-| `file_watcher.py`       | Watchdog-based file watcher that triggers CSV processing immediately when input files change.                             |
-| `async_logger.py`       | Non-blocking logger used by`printt()`and daily log files.                                                               |
-| `fetch_circuit.py`      | Redis helpers for circuit limits and LTP/average data used by StratX pricing.                                             |
-| `fetch_order_book.py`   | Standalone utility to download StratX orderbook rows into the`Trades/`folder.                                           |
-| `zzEXE.py`              | Tkinter GUI wrapper with a Start Algo button. Runs`zFinalMulti.py`.                                                     |
-| `run.cmd`               | Windows launcher that activates the virtual environment and starts`zzEXE.py`.                                           |
-| `Helper.py`             | Legacy/general helper module used by the runtime for logging and time wait helpers.                                       |
-| `heading.py`            | Small GUI heading text source used by`zzEXE.py`.                                                                        |
-| `state.json`            | StratX retry, root/reference, order metadata, and unsettled normal-order state created/updated at runtime.                 |
-| `stratx_net_state.json` | StratX runtime net-position state file created/updated at runtime.                                                        |
-| `stratx_recon_state.json` | StratX pending-correction and cooldown state created/updated at runtime.                                                |
-| `trades.csv`            | Latest orderbook snapshot written by the orderbook polling thread.                                                        |
+| Path | Purpose |
+| --- | --- |
+| `src/zFinalMulti.py` | Main runtime. Reads CSV files, starts workers, queues trades, polls orderbooks, and dispatches broker orders. |
+| `src/zzEXE.py` | Tkinter GUI wrapper. It starts `src/zFinalMulti.py` and owns the final shutdown hooks. |
+| `src/helperGS.py` | Compatibility facade that keeps `HG.greeksoft()` and `HG.StratX()` available after broker separation. |
+| `src/greeksoft/broker.py` | Complete GreekSoft authentication, instrument lookup, order placement, rate limiting, and orderbook implementation. |
+| `src/stratx/broker.py` | Complete existing StratX implementation, including pricing, retry, net state, instrument lookup, and order placement. |
+| `src/stratx/stratx_reconciliation.py` | StratX desired-versus-traded comparison, correction lifecycle, and reconciliation-state persistence. |
+| `src/utils/broker_helpers.py` | Small set of genuinely shared broker helpers for logging compatibility and price/tick adjustment. |
+| `src/utils/order_pricing.py` | Complete shared GreekSoft/StratX cache-symbol, 200 ms Redis cache, offset-price, tick-rounding, circuit-clamp, error-handling, and logging implementation. |
+| `src/utils/fetch_circuit.py` | Redis connections, failover, LTP/average reads, underlying LTP, and circuit limits. |
+| `src/utils/file_watcher.py` | Watchdog-based immediate source-file change detection. |
+| `src/utils/async_logger.py` | Non-blocking runtime logging. |
+| `src/utils/Helper.py` | Existing legacy/general helpers used by the runtime for logging and time waits. |
+| `scripts/` | Standalone operational and conversion scripts that are not imported by the live runtime. |
+| `metrics/` | Offline execution-delay, HTTP-delay, grouping, and comparison utilities. |
+| `docs/` | Supporting documentation, including the simulator guide and historical resolved issues. |
+| `credentials.py` | User-specific broker, path, quantity, Redis, and strategy configuration. |
+| `run.cmd` | Main Windows launcher. Activates the environment and runs the GUI module. |
+
+Runtime-generated paths remain at the repository root so restart and operational behavior does not change:
+
+```text
+logs/
+Trades/
+trades.csv
+state.json
+stratx_net_state.json
+stratx_recon_state.json
+```
+
+The folders use Python 3 namespace-package imports, so empty `__init__.py` files are not required. Launch commands must be run from the repository root using the documented `python -m ...` form.
 
 ## Runtime Overview
 
@@ -38,16 +52,16 @@ The normal live entry point is:
 run.cmd
 ```
 
-`run.cmd` activates `.venv` or `venv`, then starts:
+`run.cmd` activates `.venv` or `venv`, then runs from the repository root:
 
 ```text
-zzEXE.py
+python -m src.zzEXE
 ```
 
 The GUI opens and the Start Algo button runs:
 
 ```text
-zFinalMulti.py
+src/zFinalMulti.py
 ```
 
 The main flow is:
@@ -66,7 +80,7 @@ NSE/BSE trade CSV changes
 
 ## Configuration
 
-Broker and account configuration lives in `credentials.py`. Reconciliation timing and rollout controls are kept beside the runtime settings in `zFinalMulti.py`.
+Broker and account configuration lives in `credentials.py`. Reconciliation timing and rollout controls are kept beside the runtime settings in `src/zFinalMulti.py`.
 
 The most important settings are:
 
@@ -90,7 +104,7 @@ pathNSE = 'C:/AutoOnlineBackup/NSE/FO/{formatted_date}AUTOTRD.txt'
 pathBSE = 'C:/AutoOnlineBackup/BSE/FO/{formatted_date}AUTOTRD.txt'
 ```
 
-`zFinalMulti.py` fills `{formatted_date}` with:
+`src/zFinalMulti.py` fills `{formatted_date}` with:
 
 ```python
 datetime.datetime.today().strftime("%m%d")
@@ -129,7 +143,7 @@ The same source-id, option-type, and underlying filters are reused by StratX pos
 
 ### StratX Reconciliation Settings
 
-Reconciliation settings are intentionally local to `zFinalMulti.py`; they are not added to `credentials.py`:
+Reconciliation settings are intentionally local to `src/zFinalMulti.py`; they are not added to `credentials.py`:
 
 ```python
 RECON_INTERVAL_SECONDS = 5
@@ -146,7 +160,7 @@ RECON_STATE_FILE = "stratx_recon_state.json"
 broker = "STRATX"  # "STRATX" or "GREEK"
 ```
 
-This decides which class in `helperGS.py` is used:
+This decides which broker implementation is exposed through `src/helperGS.py`:
 
 ```python
 HG.StratX()
@@ -331,7 +345,7 @@ Set this in `.env`:
 OPTION_INSTRUMENT_CSV=C:/path/to/options_instruments.csv
 ```
 
-`zFinalMulti.py` refuses to start StratX before 8:50 AM, because the daily instrument file is expected to be updated before live trading starts.
+`src/zFinalMulti.py` refuses to start StratX before 8:50 AM, because the daily instrument file is expected to be updated before live trading starts.
 
 The code uses the instrument master to resolve symbol, expiry, strike, right, tick size, lot size, descriptions, and instrument lookup data.
 
@@ -342,7 +356,7 @@ The system reads two daily trade files:
 * NSE: `pathNSE`, comma-separated.
 * BSE: `pathBSE`, pipe-separated.
 
-Only specific column indexes are used by the runtime. If the upstream file format changes, these indexes must be updated in `zFinalMulti.py` and/or `helperGS.py`.
+Only specific column indexes are used by the runtime. If the upstream file format changes, these indexes must be updated in `src/zFinalMulti.py`, `src/greeksoft/broker.py`, and/or `src/stratx/broker.py` as appropriate.
 
 ### NSE Columns Used
 
@@ -378,15 +392,15 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[17]` | Instrument description/type field; reconciliation and live copying require it to contain `OPT`. |
 | `t[-1]` | Source id used by copy source filter.                                  |
 
-## Main Runtime: `zFinalMulti.py`
+## Main Runtime: `src/zFinalMulti.py`
 
-`zFinalMulti.py` coordinates the whole system.
+`src/zFinalMulti.py` coordinates the whole system.
 
 ### Startup
 
 At startup it:
 
-1. Reloads `Helper`, `helperGS`, and `credentials`.
+1. Reloads `src.utils.Helper`, the separated broker modules exposed through `src.helperGS`, and `credentials`.
 2. Creates the daily log file.
 3. Reads `BROKER` from `credentials.py`.
 4. Performs StratX-specific instrument file checks.
@@ -522,7 +536,7 @@ process_bse_csv()
 
 They are called by both:
 
-* `file_watcher.py` callbacks,
+* `src/utils/file_watcher.py` callbacks,
 * fallback polling loop.
 
 Shared CSV state is protected by:
@@ -571,7 +585,7 @@ Important behavior:
 
 ### File Watcher And Fallback Polling
 
-`zFinalMulti.py` tries to start:
+`src/zFinalMulti.py` tries to start:
 
 ```python
 start_file_watcher(csvPathNSE, csvPathBSE, process_nse_csv, process_bse_csv)
@@ -729,7 +743,7 @@ STRATX_RECON_CORRECTION_SKIPPED
 
 ## Logging
 
-Logging is routed through `async_logger.py`.
+Logging is routed through `src/utils/async_logger.py`.
 
 The log format is:
 
@@ -796,11 +810,11 @@ STRATX_ORDERBOOK_RETRY_SUBMIT | root_id=... | clients=... | sym=... | side=... |
 
 This logs once per retry batch, not once per client.
 
-## Shared Helpers In `helperGS.py`
+## Shared And GreekSoft Broker Helpers
 
 ### `printt()`, `saveInLogFile()`, And `createLogFile()`
 
-These keep the old helper API intact while routing logs through `async_logger.py`.
+These live in `src/utils/broker_helpers.py` and are re-exported by `src/helperGS.py` for compatibility. They route logs through `src/utils/async_logger.py`.
 
 * `printt()` is the normal project log function.
 * `saveInLogFile()` is retained for compatibility and routes to the same async logger.
@@ -808,7 +822,7 @@ These keep the old helper API intact while routing logs through `async_logger.py
 
 ### `wait_for_greek_order_slot()`
 
-Implements a simple Greeksoft order rate limiter.
+This remains in `src/greeksoft/broker.py` because it is GreekSoft-specific. It implements the existing GreekSoft order rate limiter.
 
 Current rate:
 
@@ -820,7 +834,7 @@ The function uses a timestamp deque and sleeps until a new order slot is availab
 
 ### `getFreezeQua(freeze_limit, lot_size, total_quantity)`
 
-Splits a large quantity into freeze-limit-safe chunks.
+This also remains in `src/greeksoft/broker.py`. It splits a large quantity into freeze-limit-safe chunks.
 
 It makes sure each chunk is aligned to lot size:
 
@@ -843,9 +857,15 @@ Applies a marketable-limit offset to a fallback price:
 
 If the price is less than or equal to 50, the fixed point offset is `market_order_offset`. Otherwise, percentage offset is used.
 
+### Shared Order Pricing
+
+`src/utils/order_pricing.py` contains the complete shared pricing functions used by GreekSoft and StratX. The original pricing logic remains together: Redis cache-symbol construction, 200 millisecond LTP/average caching, Redis reads, LTP/average offset calculation, tick rounding, circuit lookup/clamping, try/except handling, and logging.
+
+Both broker classes call these functions directly. Broker-specific instrument lookup, payload construction, retries, and order submission remain in the respective broker implementations.
+
 ## Greeksoft Broker Flow
 
-The Greeksoft broker implementation is the `greeksoft` class in `helperGS.py`.
+The GreekSoft broker implementation is the `greeksoft` class in `src/greeksoft/broker.py`. `src/helperGS.py` re-exports it so the runtime can continue calling `HG.greeksoft()`.
 
 ### Initialization
 
@@ -936,14 +956,17 @@ Flow:
 1. Select freeze limit by symbol.
 2. Split total quantity using `getFreezeQua()`.
 3. Convert each quantity chunk to lots.
-4. Wait for Greeksoft rate-limit slot.
-5. Send `NewOrderRequest` to Greeksoft.
-6. Return the list of Greeksoft order IDs.
+4. Build the Redis cache symbol from the resolved GreekSoft instrument row using `Symbol + DDMMMYY expiry + StrikePrice + OptionType`.
+5. For each child order, wait for the GreekSoft rate-limit slot.
+6. After the wait, read fresh Redis LTP/average. Values may be reused only within the 200 millisecond cache window.
+7. Apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
+8. Send a limit order (`order_type = "1"`) with the calculated price. If pricing fails, send the existing market fallback (`order_type = "2"`, `price = "0"`).
+9. Return the list of GreekSoft order IDs.
 
 The payload uses:
 
 * exchange: `NSE`,
-* order type: `2`,
+* order type: `1` when Redis pricing succeeds, otherwise market fallback `2`,
 * product: `0`,
 * strategyName: `AlgoSelf`,
 * `iprocli` and `AccountNumber` from `credentials.py`.
@@ -955,6 +978,8 @@ Same idea as `placeOrder()`, but for BSE:
 * exchange: `BSE`,
 * symbols use SENSEX/BANKEX freeze limits,
 * side is converted to Greeksoft numeric side.
+
+BSE instrument resolution continues to use `ExchangeToken`. Redis keys are built only after the exact GreekSoft row is resolved, so monthly-expiry differences in `TradingSymbol`, `SymbolWithExpiry`, or source description do not affect pricing.
 
 For both Greeksoft NSE and BSE orders, `iprocli` and `AccountNumber` come from `credentials.py`. Use:
 
@@ -984,7 +1009,7 @@ The orderbook thread writes the returned data into `trades.csv`.
 
 ## StratX Broker Flow
 
-The StratX broker implementation is the `StratX` class in `helperGS.py`.
+The StratX broker implementation is the `StratX` class in `src/stratx/broker.py`. `src/helperGS.py` re-exports it so the runtime can continue calling `HG.StratX()`.
 
 StratX has more parts because it handles:
 
@@ -1000,7 +1025,7 @@ StratX has more parts because it handles:
 
 The live StratX path works like this:
 
-1. `zFinalMulti.py` starts and checks that `OPTION_INSTRUMENT_CSV` is configured.
+1. `src/zFinalMulti.py` starts and checks that `OPTION_INSTRUMENT_CSV` is configured.
 2. `StratX()` is created.
 3. StratX net state is loaded from `stratx_net_state.json`.
 4. The StratX net-state background saver is started.
@@ -1008,7 +1033,7 @@ The live StratX path works like this:
 6. The retry-state background saver is started.
 7. The instrument master is filtered and cached so BSE contracts, tick sizes, lot sizes, OTM descriptions, and retry lookups are fast.
 8. The orderbook polling thread starts and repeatedly calls `getOrderBookALL()`.
-9. When a new NSE or BSE source trade row is detected, `zFinalMulti.py` combines rows by exchange order id and pushes the combined row into the NSE or BSE queue.
+9. When a new NSE or BSE source trade row is detected, `src/zFinalMulti.py` combines rows by exchange order id and pushes the combined row into the NSE or BSE queue.
 10. A worker validates market hours, symbol, quantity, and basic option fields.
 11. The worker calls either `placeOrderStratX_NSE()` or `placeOrderStratX_BSE()`.
 12. NSE fields are read directly from the NSE trade row. BSE fields are resolved from the instrument master using `ExchangeInstrumentID` and `Description`.
@@ -1136,7 +1161,7 @@ redis_sources = [
 ]
 ```
 
-`fetch_circuit.py` keeps one Redis client per configured source and tracks the currently active source. If the active Redis fails, returns no key, returns bad data, or returns stale data, the next configured Redis source is tried. When another source succeeds, it becomes active for future reads.
+`src/utils/fetch_circuit.py` keeps one Redis client per configured source and tracks the currently active source. If the active Redis fails, returns no key, returns bad data, or returns stale data, the next configured Redis source is tried. When another source succeeds, it becomes active for future reads.
 
 `get_redis_ltp_avg(cache_symbol)` reads:
 
@@ -1723,7 +1748,7 @@ On a new day, state resets automatically.
 
 The background saver writes state only when dirty. It writes to `state.json.tmp` and then uses `os.replace()` so the state file is not left half-written.
 
-`zzEXE.py` also calls `save_stratx_net_state_now()` and `save_retry_state_now()` before closing the app.
+`src/zzEXE.py` also calls `save_stratx_net_state_now()` and `save_retry_state_now()` before closing the app.
 
 ### `retry_failed_orderbook_orders(rows)`
 
@@ -1768,7 +1793,7 @@ It recalculates price from fresh Redis LTP/avg and circuit data. It does not ret
 
 ## Standalone StratX Orderbook Export
 
-`fetch_order_book.py` is a separate utility script.
+`scripts/fetch_order_book.py` is a separate utility script.
 
 It:
 
@@ -1788,9 +1813,46 @@ fetch_order_book.log
 
 Use this when you want a separate historical/orderbook export outside the live engine.
 
+Run it from the repository root with:
+
+```bat
+scripts\fetch_order_book.cmd
+```
+
+The launcher changes back to the repository root and runs `python -m scripts.fetch_order_book`, so the script continues to use root-level `credentials.py` and writes to the existing `Trades/` directory.
+
+## Standalone Scripts And Metrics
+
+The files under `scripts/` and `metrics/` are not imported by the live runtime.
+
+Operational and conversion scripts:
+
+| File | Purpose |
+| --- | --- |
+| `scripts/fetch_order_book.py` | Downloads the StratX report orderbook into `Trades/YYYYMMDD.csv`. |
+| `scripts/fetch_order_book.cmd` | Windows launcher for the standalone orderbook export. |
+| `scripts/convert_trade_txt_to_csv.py` | Converts and groups an NSE/BSE source trade text file. |
+
+Offline metrics:
+
+| File | Purpose |
+| --- | --- |
+| `metrics/execute_delay.py` | Calculates StratX execution delay from exported TRADED rows. |
+| `metrics/http_delay.py` | Extracts slow StratX HTTP entries from a log file. |
+| `metrics/trades_min_max_filter.py` | Calculates the execution-time spread for each reference id. |
+| `metrics/compare_latency_outputs.py` | Compares grouped source, GreekSoft, and StratX latency outputs. |
+
+Run Python utilities from the repository root using module form, for example:
+
+```bat
+python -m scripts.convert_trade_txt_to_csv
+python -m metrics.execute_delay
+python -m metrics.compare_latency_outputs
+```
+
 ## Circuit And Redis Support
 
-`fetch_circuit.py` contains:
+`src/utils/fetch_circuit.py` contains:
 
 ### `get_redis_client(source)`
 
@@ -1822,7 +1884,7 @@ Circuit data also uses the active Redis failover flow. If all sources fail, `get
 
 ## File Watcher
 
-`file_watcher.py` uses `watchdog`.
+`src/utils/file_watcher.py` uses `watchdog`.
 
 It watches the directories containing the NSE and BSE trade files and reacts to:
 
@@ -1834,7 +1896,7 @@ It watches the directories containing the NSE and BSE trade files and reacts to:
 
 ## Async Logger
 
-`async_logger.py` keeps log writes out of the order hot path.
+`src/utils/async_logger.py` keeps log writes out of the order hot path.
 
 It uses:
 
@@ -1849,12 +1911,12 @@ If async logging fails, `fallback_log()` writes directly to stdout and file.
 
 ## GUI Wrapper
 
-`zzEXE.py` creates a small Tkinter GUI.
+`src/zzEXE.py` creates a small Tkinter GUI.
 
 The Start Algo button runs:
 
 ```python
-exec_script('zFinalMulti.py', on_algo_complete)
+exec_script('src/zFinalMulti.py', on_algo_complete)
 ```
 
 Output is redirected into a scrollable text area.

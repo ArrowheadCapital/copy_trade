@@ -6,10 +6,16 @@ import sys
 import io
 import os
 import importlib
+from pathlib import Path
+
+repository_root = str(Path(__file__).resolve().parent.parent)
+if repository_root not in sys.path:
+    sys.path.insert(0, repository_root)
+
 import credentials as cre
 importlib.reload(cre)
 
-import heading as hed
+from src import heading as hed
 
 data = hed.data
 copy_trade_paused = threading.Event()
@@ -44,7 +50,7 @@ def run_algo():
         selected_mode = stratx_expiry_var.get().strip().upper().replace(" ", "_")
         os.environ["STRATX_EXPIRY_MODE"] = selected_mode
         print(f"[INFO] StratX expiry mode: {stratx_expiry_var.get()}")
-    thread = threading.Thread(target=exec_script, args=('zFinalMulti.py', on_algo_complete))
+    thread = threading.Thread(target=exec_script, args=('src/zFinalMulti.py', on_algo_complete))
     thread.start()
 
 def on_algo_complete():
@@ -153,7 +159,7 @@ text_container = ttk.Frame(inner_frame)
 text_container.pack(side=tk.LEFT)
 
 subtitle_label = ttk.Label(text_container,
-                           text=f"Greek Mini Admin to Greek : {data}",
+                           text=data,
                            font=("Segoe UI", 18, 'bold'),
                            foreground="#404750")
 subtitle_label.pack(anchor="center", pady=(4, 0))
