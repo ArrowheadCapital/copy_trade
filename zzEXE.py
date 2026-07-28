@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 import threading
 import sys
@@ -13,6 +13,17 @@ import heading as hed
 
 data = hed.data
 copy_trade_paused = threading.Event()
+stratx_started_mode = None
+STRATX_NET_LIMIT_NAMES = (
+    "NIFTY_CE_POS_NET",
+    "NIFTY_CE_NEG_NET",
+    "NIFTY_PE_POS_NET",
+    "NIFTY_PE_NEG_NET",
+    "SENSEX_CE_POS_NET",
+    "SENSEX_CE_NEG_NET",
+    "SENSEX_PE_POS_NET",
+    "SENSEX_PE_NEG_NET",
+)
 
 class RedirectText(io.StringIO):
     def __init__(self, text_widget):
@@ -38,17 +49,116 @@ def exec_script(script_name, on_complete):
     finally:
         on_complete()
 
+def get_start_config_errors():
+    errors = []
+
+    if not str(getattr(cre, "copy_source_id", "") or "").strip():
+        errors.append("copy_source_id is missing or empty")
+
+    if cre.broker.upper() == "STRATX":
+        if not str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip():
+            errors.append("STRATX_NET_CLIENT_ID is missing or empty")
+
+        for name in STRATX_NET_LIMIT_NAMES:
+            value = getattr(cre, name, None)
+            if value is None or not str(value).strip():
+                errors.append(f"{name} is missing or empty")
+                continue
+            try:
+                int(float(value))
+            except (TypeError, ValueError, OverflowError):
+                errors.append(f"{name} must be numeric")
+
+    return errors
+
 def run_algo():
+    global stratx_started_mode
+    config_errors = get_start_config_errors()
+    if config_errors:
+        messagebox.showerror(
+            "Configuration Error",
+            "Please fix these settings in credentials.py:\n\n" + "\n".join(config_errors),
+            parent=root,
+        )
+        return
+
     algo_button.config(state='disabled')
     if cre.broker.upper() == "STRATX":
         selected_mode = stratx_expiry_var.get().strip().upper().replace(" ", "_")
+        stratx_started_mode = selected_mode
         os.environ["STRATX_EXPIRY_MODE"] = selected_mode
         print(f"[INFO] StratX expiry mode: {stratx_expiry_var.get()}")
     thread = threading.Thread(target=exec_script, args=('zFinalMulti.py', on_algo_complete))
     thread.start()
 
 def on_algo_complete():
+    global stratx_started_mode
+    stratx_started_mode = None
     algo_button.config(state='normal')
+
+def get_config_info():
+    lines = [f"Multiplier: {cre.multiplier}"]
+
+    if cre.broker.upper() == "STRATX":
+        net_client_id = str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip() or "Missing"
+
+        if str(cre.strategy_name).strip().upper() == "IMPULSE CORE":
+            mode = stratx_started_mode or stratx_expiry_var.get().strip().upper().replace(" ", "_")
+            offset = 1 if mode == "EXPIRY" else 0
+            lines.append(f"OTM Offset: {offset} ({mode.replace('_', ' ').title()})")
+
+        def net_range(bucket):
+            try:
+                pos_limit = max(int(float(getattr(cre, f"{bucket}_POS_NET"))), 0)
+                neg_limit = max(int(float(getattr(cre, f"{bucket}_NEG_NET"))), 0)
+                return f"-{neg_limit} to +{pos_limit}"
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                return "Missing/invalid"
+
+        lines.extend([
+            "",
+            f"Net Client ID: {net_client_id}",
+            "Allowed Net Quantity:",
+            f"NIFTY CE:  {net_range('NIFTY_CE')}",
+            f"NIFTY PE:  {net_range('NIFTY_PE')}",
+            f"SENSEX CE: {net_range('SENSEX_CE')}",
+            f"SENSEX PE: {net_range('SENSEX_PE')}",
+        ])
+
+    return "\n".join(lines)
+
+info_popup = None
+
+def show_config_info(event):
+    global info_popup
+    if info_popup is not None:
+        return
+
+    info_popup = tk.Toplevel(root)
+    info_popup.wm_overrideredirect(True)
+    info_label = tk.Label(
+        info_popup,
+        text=get_config_info(),
+        justify=tk.LEFT,
+        background="#fffbea",
+        foreground="#111827",
+        relief="solid",
+        borderwidth=1,
+        padx=10,
+        pady=8,
+        font=("Segoe UI", 10),
+    )
+    info_label.pack()
+    info_popup.update_idletasks()
+    x = event.widget.winfo_rootx() + event.widget.winfo_width() + 4
+    y = event.widget.winfo_rooty() + event.widget.winfo_height() + 4
+    info_popup.wm_geometry(f"+{x}+{y}")
+
+def hide_config_info(_event):
+    global info_popup
+    if info_popup is not None:
+        info_popup.destroy()
+        info_popup = None
 
 def toggle_pause():
     if copy_trade_paused.is_set():
@@ -149,10 +259,15 @@ text_container = ttk.Frame(inner_frame)
 text_container.pack(side=tk.LEFT)
 
 subtitle_label = ttk.Label(text_container,
-                           text=f"Greek Mini Admin to Greek : {data}",
+                           text=data,
                            font=("Segoe UI", 18, 'bold'),
                            foreground="#404750")
 subtitle_label.pack(anchor="center", pady=(4, 0))
+
+info_icon = ttk.Label(root, text="ⓘ", font=("Segoe UI", 16), foreground="#3b82f6", cursor="hand2")
+info_icon.place(relx=1.0, x=-16, y=12, anchor="ne")
+info_icon.bind("<Enter>", show_config_info)
+info_icon.bind("<Leave>", hide_config_info)
 
 # --- Logs Display ---
 logs_card = ttk.Frame(root, padding=20, style="Card.TFrame")
