@@ -4,7 +4,7 @@ Copy Trade is a Python trade-copying engine. It watches live NSE and BSE trade f
 
 The project currently supports two broker paths:
 
-* `GREEK`: GreekSoft API order placement, Redis pricing, orderbook polling, and failed-order retry.
+* `GREEK`: GreekSoft API order placement, Redis pricing, orderbook polling, failed-order retry, and runtime positive/negative net-limit control.
 * `STRATX`: StratX API order placement, pricing, circuit clamping, orderbook polling, client-aware failed-order retry, and runtime positive/negative net-limit control.
 
 This README explains the complete project flow and the important functions in the codebase.
@@ -16,7 +16,7 @@ This README explains the complete project flow and the important functions in th
 | `src/zFinalMulti.py` | Main runtime. Reads CSV files, starts workers, queues trades, polls orderbooks, and dispatches broker orders. |
 | `src/zzEXE.py` | Tkinter GUI wrapper. It starts `src/zFinalMulti.py` and owns the final shutdown hooks. |
 | `src/helperGS.py` | Compatibility facade that keeps `HG.greeksoft()` and `HG.StratX()` available after broker separation. |
-| `src/greeksoft/broker.py` | Complete GreekSoft authentication, precomputed instrument lookup, pooled order placement, pricing, HTTP/orderbook retry, retry-state persistence, rate limiting, and orderbook implementation. |
+| `src/greeksoft/broker.py` | Complete GreekSoft authentication, precomputed instrument lookup, pooled order placement, pricing, HTTP/orderbook retry, retry/net-state persistence, net-limit control, rate limiting, and orderbook implementation. |
 | `src/stratx/broker.py` | Complete existing StratX implementation, including pricing, retry, net state, instrument lookup, and order placement. |
 | `src/stratx/stratx_reconciliation.py` | StratX desired-versus-traded comparison, correction lifecycle, and reconciliation-state persistence. |
 | `src/utils/broker_helpers.py` | Small set of genuinely shared broker helpers for logging compatibility and price/tick adjustment. |
@@ -41,6 +41,7 @@ state.json
 stratx_net_state.json
 stratx_recon_state.json
 greek_state.json
+greek_net_state.json
 ```
 
 The folders use Python 3 namespace-package imports, so empty `__init__.py` files are not required. Launch commands must be run from the repository root using the documented `python -m ...` form.
@@ -91,11 +92,12 @@ The most important settings are:
 | `pathNSE`/`pathBSE`                                                                                                                                                     | Daily source trade-file templates. They must contain`{formatted_date}`.                                                                                                                                                                                                                                                |
 | `multiplier`                                                                                                                                                              | Multiplies copied order quantity. Default is`1`.                                                                                                                                                                                                                                                                       |
 | `copy_source_id`                                                                                                                                                          | Source id allowed for copied rows. NSE and BSE rows with a different source id are skipped before combining.                                                                                                                                                                                                            |
+| `source_strategy_names`                                                                                                                                                   | List of source strategy names allowed for copied NSE and BSE rows.                                                                                                                                                                                                                                                       |
 | `niftyFreeze`,`bnfFreeze`,`sensexFreeze`,`bankex`,`midcpnifty`,`finnifty`                                                                                       | Freeze quantity limits used while placing/splitting orders.                                                                                                                                                                                                                                                              |
 | `optionInstrumentPath`                                                                                                                                                    | StratX instrument CSV path, loaded from`OPTION_INSTRUMENT_CSV`in`.env`.                                                                                                                                                                                                                                              |
 | `strategy_name`                                                                                                                                                           | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value.                                                                                                                                                                                                                                  |
 | StratX Expiry Mode dropdown                                                                                                                                               | StratX Impulse Core offset mode in the GUI. Default `Non Expiry` uses offset `0`; `Expiry` uses offset `1`.                                                                                                                                                                                                            |
-| `NIFTY_CE_POS_NET`,`NIFTY_CE_NEG_NET`,`NIFTY_PE_POS_NET`,`NIFTY_PE_NEG_NET`,`SENSEX_CE_POS_NET`,`SENSEX_CE_NEG_NET`,`SENSEX_PE_POS_NET`,`SENSEX_PE_NEG_NET` | StratX separate positive-side and negative-side net quantity limits using final StratX order quantity. BUY increases net toward the positive limit. SELL decreases net toward the negative limit. If full quantity crosses the relevant side limit, the order may be reduced to the maximum valid lot-multiple quantity. |
+| `NIFTY_CE_POS_NET`,`NIFTY_CE_NEG_NET`,`NIFTY_PE_POS_NET`,`NIFTY_PE_NEG_NET`,`SENSEX_CE_POS_NET`,`SENSEX_CE_NEG_NET`,`SENSEX_PE_POS_NET`,`SENSEX_PE_NEG_NET` | Shared GreekSoft/StratX positive-side and negative-side net quantity limits. BUY increases net toward the positive limit. SELL decreases net toward the negative limit. If full quantity crosses the relevant side limit, the order may be reduced to the maximum valid lot-multiple quantity. |
 | `STRATX_NET_CLIENT_ID`                                                                                                                                                    | Client id used for StratX orderbook rollback, default`Y05601`.                                                                                                                                                                                                                                                         |
 
 ### Input Files
@@ -113,16 +115,17 @@ datetime.datetime.today().strftime("%m%d")
 
 For example, on June 2 the file name date part is `0602`.
 
-NSE files are comma-separated. BSE files are pipe-separated.
+NSE files are comma-separated. BSE files are pipe-separated. Each exchange's first row is validated once against its exact expected header. A mismatch disables copying for that exchange for the current run. After validation, the header is skipped and existing positional trade-row processing continues unchanged.
 
 ### Copy Source Filter
 
 Rows are filtered before grouping/combining.
 
-The allowed source id is configured in `credentials.py`:
+The allowed source id and source strategy names are configured in `credentials.py`:
 
 ```python
 copy_source_id = "TS739"
+source_strategy_names = ["GREEKSOFT"]
 ```
 
 The allowed row delay is configured in `.env`:
@@ -131,7 +134,7 @@ The allowed row delay is configured in `.env`:
 COPY_ALLOWED_DELAY_SECONDS = 120
 ```
 
-A row is copied only when its source id matches `copy_source_id` and the difference between current system time and row time is less than or equal to `COPY_ALLOWED_DELAY_SECONDS`.
+A row is copied only when its source id matches `copy_source_id`, its strategy matches one value in `source_strategy_names`, and the difference between current system time and row time is less than or equal to `COPY_ALLOWED_DELAY_SECONDS`. Source strategy comparison is case-insensitive and ignores surrounding whitespace.
 
 The live option-copy scope is additionally restricted to:
 
@@ -144,16 +147,23 @@ The same source-id, option-type, and underlying filters are reused by StratX pos
 
 ### StratX Reconciliation Settings
 
-Reconciliation settings are intentionally local to `src/zFinalMulti.py`; they are not added to `credentials.py`:
+Reconciliation is disabled by default directly in `src/zFinalMulti.py`; it is not controlled through `credentials.py` or `.env`:
+
+```python
+STRATX_RECONCILIATION_ENABLED = False
+```
+
+When disabled, the reconciliation module is not imported and no reconciliation manager, thread, report fetch, state handling, mismatch detection, or correction flow runs. The remaining reconciliation settings stay local to `src/zFinalMulti.py`:
 
 ```python
 RECON_INTERVAL_SECONDS = 5
 RECON_REQUIRED_CONFIRMATIONS = 5
 RECON_COOLDOWN_SECONDS = 60
+RECON_REPORT_ONLY = True
 RECON_STATE_FILE = "stratx_recon_state.json"
 ```
 
-`RECON_REPORT_ONLY` controls rollout behavior: when true, confirmed mismatches are logged but correction orders are not submitted.
+`RECON_REPORT_ONLY` is also `True` by default for safety. If reconciliation is explicitly enabled, confirmed mismatches are logged but correction orders are not submitted until this separate setting is deliberately changed to `False`.
 
 ### Broker Selection
 
@@ -189,9 +199,9 @@ multiplier = 1
 
 Both broker paths multiply copied quantity by `multiplier`.
 
-### StratX Net Limit Partial Quantity
+### Broker Net Limit Partial Quantity
 
-StratX net limits are checked per bucket:
+GreekSoft and StratX net limits are checked per bucket:
 
 ```python
 NIFTY_CE_POS_NET / NIFTY_CE_NEG_NET
@@ -283,7 +293,7 @@ SENSEX_CE_NEG_NET = 40
 Allowed final SENSEX_CE net range = -40 to +20
 ```
 
-Lot size is read from the instrument data. If lot size is missing, fallback values are used:
+Lot size is read from broker instrument data. GreekSoft uses the resolved GreekSoft `LotSize`; StratX retains its existing fallback values when lot size is missing:
 
 ```text
 NIFTY = 65
@@ -375,6 +385,7 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[17]` | Client code. Filtering by this is present in comments, but not active. |
 | `t[23]` | Exchange order id used by combine logic.                               |
 | `t[25]` | Source row timestamp used by copy delay filter, for example`13 APR 2026 09:15:02`. |
+| `t[26]` | Source strategy name checked against `source_strategy_names`.                    |
 | `t[27]` | Source id used by copy source filter.                                  |
 
 ### BSE Columns Used
@@ -391,6 +402,7 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[15]` | Source row time used by copy delay filter, format`HH:MM:SS`.           |
 | `t[16]` | Exchange order id used by combine logic.                               |
 | `t[17]` | Instrument description/type field; reconciliation and live copying require it to contain `OPT`. |
+| `t[-2]` | Source strategy name checked against `source_strategy_names`.          |
 | `t[-1]` | Source id used by copy source filter.                                  |
 
 ## Main Runtime: `src/zFinalMulti.py`
@@ -408,10 +420,10 @@ At startup it:
 5. Creates the broker object.
 6. Builds today's NSE/BSE CSV paths.
 7. Starts the orderbook thread.
-8. Preloads StratX net state, instrument data, and retry state if broker is StratX.
+8. Preloads and synchronizes the selected broker's net state; StratX also loads its instrument data and retry state.
 9. Starts NSE/BSE worker pools.
 10. Starts the file watcher and fallback poll loop.
-11. Starts StratX reconciliation in its own daemon thread when the selected broker is StratX.
+11. Starts StratX reconciliation in its own daemon thread only when the selected broker is StratX and `STRATX_RECONCILIATION_ENABLED` is `True`.
 
 ### `read_csv_safely(path, sep=',', max_retries=3)`
 
@@ -581,7 +593,7 @@ qty_col = 7
 exchange_order_id_col = 16
 ```
 
-Before grouping, the code skips rows whose source id does not match `copy_source_id`, whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`, or which fall outside the NIFTY/SENSEX option scope described above.
+Before grouping, the code skips rows whose source id does not match `copy_source_id`, whose strategy is not in `source_strategy_names`, whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`, or which fall outside the NIFTY/SENSEX option scope described above.
 
 The code then groups allowed new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
 
@@ -701,7 +713,7 @@ Corrections also reuse existing:
 * rejected/cancelled order retry;
 * reserved-net release after final failure.
 
-The reconciliation module is imported and started only when `BROKER == "STRATX"`. GreekSoft runs do not import it, create its background threads, fetch StratX reports, or initialize its state.
+The reconciliation module is imported and started only when `BROKER == "STRATX"` and `STRATX_RECONCILIATION_ENABLED` is `True`. Disabled StratX runs and all GreekSoft runs do not import it, create its background threads, fetch StratX reports, initialize its state, or track reconciliation-only unsettled contracts.
 
 ### Pending Corrections, Retry, And Cooldown
 
@@ -834,7 +846,8 @@ This remains in `src/greeksoft/broker.py` because it is GreekSoft-specific. It i
 Current rate:
 
 ```python
-MAX_GREEK_ORDERS_PER_SEC = 9
+MAX_GREEK_ORDERS_PER_WINDOW = 9
+GREEK_RATE_WINDOW_SECONDS = 1.2
 ```
 
 The function uses a timestamp deque and sleeps until a new order slot is available.
@@ -885,6 +898,8 @@ When `greeksoft()` is created:
 5. It loads the current day's retry state from `greek_state.json`.
 6. It starts the dirty-state saver.
 7. It creates and warms five reusable GreekSoft order-worker sessions.
+
+Before NSE/BSE order workers start, `src/zFinalMulti.py` also loads `greek_net_state.json`, starts its net-state saver, and replaces the saved net with a fresh GreekSoft orderbook sync when that sync succeeds. If startup sync fails, the same-day saved net remains active.
 
 Authentication, login, instrument download, warmup, order submission, and orderbook requests use bounded request timeouts. Initialization fails after four unsuccessful authentication/startup attempts instead of continuing with an unusable broker object.
 
@@ -976,13 +991,14 @@ Flow:
 2. Split total quantity using `getFreezeQua()`.
 3. Convert each quantity chunk to lots.
 4. Build the Redis cache symbol from the resolved GreekSoft instrument row using `Symbol + DDMMMYY expiry + StrikePrice + OptionType`.
-5. Give every child order its own root id and persist its original metadata in memory.
-6. Enqueue each child into the shared five-worker GreekSoft order pool.
-7. In the worker, wait for the GreekSoft rate-limit slot.
-8. After the wait, read fresh Redis LTP/average. Values may be reused only within the 200 millisecond cache window.
-9. Apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
-10. Send a limit order (`order_type = "1"`) with the calculated price. If pricing fails, send the existing market fallback (`order_type = "2"`, `price = "0"`).
-11. Validate the response and map the returned `gorderid` to the child's root id.
+5. Check and reserve the child's NIFTY/SENSEX CE/PE net under `greek_net_lock`; reduce to the maximum valid lot multiple or skip when the configured range cannot accept the full quantity.
+6. Give every accepted child order its own root id and persist its original metadata and net metadata in memory.
+7. Enqueue each child into the shared five-worker GreekSoft order pool.
+8. In the worker, wait for the GreekSoft rate-limit slot.
+9. After the wait, read fresh Redis LTP/average. Values may be reused only within the 200 millisecond cache window.
+10. Apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
+11. Send a limit order (`order_type = "1"`) with the calculated price. If pricing fails, send the existing market fallback (`order_type = "2"`, `price = "0"`).
+12. Validate the response and map the returned `gorderid` to the child's root id.
 
 The payload uses:
 
@@ -990,6 +1006,7 @@ The payload uses:
 * order type: `1` when Redis pricing succeeds, otherwise market fallback `2`,
 * product: `0`,
 * strategyName: `AlgoSelf`,
+* `tag` and `userTag`: copied source exchange order id as a string (`t[23]` for NSE and `t[16]` for BSE),
 * `iprocli` and `AccountNumber` from `credentials.py`.
 
 ### `placeOrderBSE(...)`
@@ -1042,6 +1059,46 @@ getOrderBookDetailWithLegV2
 
 The orderbook thread writes the returned data into `trades.csv`.
 
+### GreekSoft Net Limit And Synchronization
+
+GreekSoft protects the same four option buckets and uses the same settings in `credentials.py` as StratX:
+
+```text
+NIFTY_CE
+NIFTY_PE
+SENSEX_CE
+SENSEX_PE
+```
+
+Each bucket contains one signed running quantity. Side `1`/BUY adds quantity and side `2`/SELL subtracts quantity. The lock-protected reservation happens once for each original freeze-split child before it enters the order pool. A retry keeps the same root and reservation, so retry quantity is not added again.
+
+The full child is accepted when its final net remains between `-NEG_NET` and `+POS_NET`. Otherwise the quantity is reduced to the largest valid lot multiple. The child is skipped when no valid lot-multiple quantity fits. If the current broker net is already outside a configured limit, only orders that reduce that exposure are allowed.
+
+GreekSoft runtime net is stored separately from retry state in:
+
+```text
+greek_net_state.json
+```
+
+The date-scoped file contains `net_position` and `released_roots`. Order placement changes only locked in-memory state and marks it dirty; a one-second background saver writes through `greek_net_state.json.tmp` and atomically replaces the state file. GUI shutdown saves it immediately.
+
+Startup and the GUI Sync Net button call `sync_greek_net_from_traded_orders()`. The sync fetches `getOrderBookDetailWithLegV2`, accepts `OPTIDX` rows with `traded_qty > 0`, deduplicates them by `gorderid`, and aggregates `scripName + optionType + side` into the four buckets. Counting `traded_qty` also includes partially traded orders instead of relying only on the final `order_status` text. A successful sync replaces all four local values and clears old release markers; a failed sync leaves the loaded same-day state unchanged.
+
+If an original child cannot be enqueued or finishes HTTP submission without a `gorderid`, its full reservation is rolled back once. If a retry cannot be enqueued/submitted, or a cancelled order reaches the configured orderbook retry limit, only that retry/final `pending_qty` is released once. A tracked `Exchange Rejected` row with `pending_qty > 0` is terminal and releases that pending quantity immediately without retry. Existing `processed_gorderids` and `released_roots` guards prevent duplicate handling. These actions use the existing root metadata and do not change the GreekSoft retry condition.
+
+Important GreekSoft net logs:
+
+```text
+GREEK_NET_SYNC_DONE
+GREEK_NET_SYNC_FAILED
+GREEK_NET_SYNC_OVER_LIMIT
+GREEK_NET_RESERVED
+GREEK_NET_PARTIAL_ALLOWED
+GREEK_NET_LIMIT_SKIP
+GREEK_NET_ROLLBACK
+GREEK_NET_RELEASE
+```
+
 ### GreekSoft Orderbook Retry
 
 GreekSoft orderbook retry is separate from HTTP attempts. Retry state is stored in:
@@ -1081,6 +1138,10 @@ For an eligible row, `retry_failed_greeksoft_orders()`:
 7. Enqueues a retry task through the same five-worker pool.
 8. Recalculates price after the rate-limit wait.
 9. Maps the newly returned retry `gorderid` to the same root.
+
+When a later cancelled row reaches `max_greek_orderbook_retries`, its remaining `pending_qty` is released from GreekSoft net once. Retry enqueue/HTTP failure also releases that retry quantity once. The retry counter is still intentionally consumed and is not rolled back.
+
+`Exchange Rejected` remains non-retryable. For an order mapped to a GreekSoft root, `pending_qty > 0` is released once and its `gorderid` is marked processed. Active/unknown statuses are not treated as terminal failures.
 
 GreekSoft position reconciliation is not implemented by this retry feature.
 
@@ -1484,8 +1545,8 @@ Before building the payload, StratX checks whether an option order is ITM using 
 * SENSEX/BSX options use `cache:LTP_SENSEX`
 * spot is rounded to the nearest valid strike, with an exact midpoint rounded upward
 * NIFTY uses a 50-point strike step and SENSEX/BSX uses a 100-point strike step
-* CE is allowed up to two strike steps below ATM; anything deeper ITM is skipped
-* PE is allowed up to two strike steps above ATM; anything deeper ITM is skipped
+* NIFTY CE/PE is allowed up to two strike steps ITM; anything deeper is skipped
+* SENSEX CE/PE is allowed up to six strike steps ITM; anything deeper is skipped
 * if fresh underlying LTP is unavailable from all Redis sources, the ITM check is skipped and the order continues
 
 Important payload fields:
@@ -1504,8 +1565,11 @@ Important payload fields:
 "exchange": exchange
 "segment": segment
 "right": right
+"trigger": source_order_id
 "quantity_split": freez
 ```
+
+For copied orders, `trigger` contains the combined source row's exchange order id as a string (`t[23]` for NSE and `t[16]` for BSE). The value is stored in the existing root metadata so an orderbook retry sends the same source order id without any additional lookup.
 
 For original broadcast orders:
 
@@ -1990,6 +2054,10 @@ If async logging fails, `fallback_log()` writes directly to stdout and file.
 
 `src/zzEXE.py` creates a small Tkinter GUI.
 
+The heading shows the selected broker, `copy_source_id`, and the destination GreekSoft username or StratX strategy name. Before startup, the GUI requires `copy_source_id`, requires `source_strategy_names` to be a list, tuple or set containing at least one nonblank strategy, validates all eight shared GreekSoft/StratX POS/NEG net limits as present and numeric, and additionally requires `STRATX_NET_CLIENT_ID` for StratX. All detected configuration errors are shown together and the algo is not started until they are corrected.
+
+The top-right information icon shows broker, copy source, multiplier, and the four configured net ranges for both brokers. For StratX it also shows the net client id and, for Impulse Core, the selected Expiry/Non-Expiry mode and resulting OTM offset. While StratX is running, the popup retains the mode that was used at startup.
+
 The Start Algo button runs:
 
 ```python
@@ -1998,10 +2066,12 @@ exec_script('src/zFinalMulti.py', on_algo_complete)
 
 Output is redirected into a scrollable text area.
 
+The Sync Net button is available for both brokers after the algo starts. It runs the selected broker's sync method in a daemon worker, disables the button during the sync, and restores it afterward. StratX continues using its existing TRADED-report sync; GreekSoft uses its GreekSoft orderbook `traded_qty` sync.
+
 On close:
 
-1. For StratX, it saves net, retry, and reconciliation state.
-2. For GreekSoft, it saves `greek_state.json` if the broker object is active.
+1. For StratX, it saves net and retry state; reconciliation state is saved only when reconciliation is enabled and its manager exists.
+2. For GreekSoft, it saves `greek_net_state.json` and `greek_state.json` if the broker object is active.
 3. It destroys the Tkinter root.
 4. It calls `os._exit(0)` to terminate background threads.
 

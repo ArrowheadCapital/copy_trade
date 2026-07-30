@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 import threading
 import sys
@@ -19,6 +19,17 @@ from src import heading as hed
 
 data = hed.data
 copy_trade_paused = threading.Event()
+stratx_started_mode = None
+STRATX_NET_LIMIT_NAMES = (
+    "NIFTY_CE_POS_NET",
+    "NIFTY_CE_NEG_NET",
+    "NIFTY_PE_POS_NET",
+    "NIFTY_PE_NEG_NET",
+    "SENSEX_CE_POS_NET",
+    "SENSEX_CE_NEG_NET",
+    "SENSEX_PE_POS_NET",
+    "SENSEX_PE_NEG_NET",
+)
 
 class RedirectText(io.StringIO):
     def __init__(self, text_widget):
@@ -44,17 +55,122 @@ def exec_script(script_name, on_complete):
     finally:
         on_complete()
 
+def get_start_config_errors():
+    errors = []
+
+    if not str(getattr(cre, "copy_source_id", "") or "").strip():
+        errors.append("copy_source_id is missing or empty")
+
+    source_strategy_names = getattr(cre, "source_strategy_names", [])
+    if not isinstance(source_strategy_names, (list, tuple, set)) or not any(str(name).strip() for name in source_strategy_names):
+        errors.append("source_strategy_names must contain at least one strategy")
+
+    if cre.broker.upper() == "STRATX" and not str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip():
+        errors.append("STRATX_NET_CLIENT_ID is missing or empty")
+
+    if cre.broker.upper() in ("STRATX", "GREEK"):
+        for name in STRATX_NET_LIMIT_NAMES:
+            value = getattr(cre, name, None)
+            if value is None or not str(value).strip():
+                errors.append(f"{name} is missing or empty")
+                continue
+            try:
+                int(float(value))
+            except (TypeError, ValueError, OverflowError):
+                errors.append(f"{name} must be numeric")
+
+    return errors
+
 def run_algo():
+    global stratx_started_mode
+    config_errors = get_start_config_errors()
+    if config_errors:
+        messagebox.showerror("Configuration Error", "Please fix these settings in credentials.py:\n\n" + "\n".join(config_errors), parent=root)
+        return
+
     algo_button.config(state='disabled')
     if cre.broker.upper() == "STRATX":
         selected_mode = stratx_expiry_var.get().strip().upper().replace(" ", "_")
+        stratx_started_mode = selected_mode
         os.environ["STRATX_EXPIRY_MODE"] = selected_mode
         print(f"[INFO] StratX expiry mode: {stratx_expiry_var.get()}")
     thread = threading.Thread(target=exec_script, args=('src/zFinalMulti.py', on_algo_complete))
     thread.start()
 
 def on_algo_complete():
+    global stratx_started_mode
+    stratx_started_mode = None
     algo_button.config(state='normal')
+
+def get_config_info():
+    broker_name = cre.broker.upper()
+    lines = [
+        f"Broker: {broker_name}",
+        f"Copy Source ID: {str(getattr(cre, 'copy_source_id', '') or '').strip() or 'Missing'}",
+        f"Multiplier: {cre.multiplier}",
+    ]
+
+    if broker_name == "STRATX":
+        net_client_id = str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip() or "Missing"
+        lines.append(f"Net Client ID: {net_client_id}")
+
+        if str(cre.strategy_name).strip().upper() == "IMPULSE CORE":
+            mode = stratx_started_mode or stratx_expiry_var.get().strip().upper().replace(" ", "_")
+            offset = 1 if mode == "EXPIRY" else 0
+            lines.append(f"OTM Offset: {offset} ({mode.replace('_', ' ').title()})")
+
+    def net_range(bucket):
+        try:
+            pos_limit = max(int(float(getattr(cre, f"{bucket}_POS_NET"))), 0)
+            neg_limit = max(int(float(getattr(cre, f"{bucket}_NEG_NET"))), 0)
+            return f"-{neg_limit} to +{pos_limit}"
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return "Missing/invalid"
+
+    if broker_name in ("STRATX", "GREEK"):
+        lines.extend([
+            "",
+            "Allowed Net Quantity:",
+            f"NIFTY CE:  {net_range('NIFTY_CE')}",
+            f"NIFTY PE:  {net_range('NIFTY_PE')}",
+            f"SENSEX CE: {net_range('SENSEX_CE')}",
+            f"SENSEX PE: {net_range('SENSEX_PE')}",
+        ])
+
+    return "\n".join(lines)
+
+info_popup = None
+
+def show_config_info(event):
+    global info_popup
+    if info_popup is not None:
+        return
+
+    info_popup = tk.Toplevel(root)
+    info_popup.wm_overrideredirect(True)
+    info_label = tk.Label(
+        info_popup,
+        text=get_config_info(),
+        justify=tk.LEFT,
+        background="#fffbea",
+        foreground="#111827",
+        relief="solid",
+        borderwidth=1,
+        padx=10,
+        pady=8,
+        font=("Segoe UI", 10),
+    )
+    info_label.pack()
+    info_popup.update_idletasks()
+    x = event.widget.winfo_rootx() + event.widget.winfo_width() + 4
+    y = event.widget.winfo_rooty() + event.widget.winfo_height() + 4
+    info_popup.wm_geometry(f"+{x}+{y}")
+
+def hide_config_info(_event):
+    global info_popup
+    if info_popup is not None:
+        info_popup.destroy()
+        info_popup = None
 
 def toggle_pause():
     if copy_trade_paused.is_set():
@@ -66,22 +182,24 @@ def toggle_pause():
         pause_button.config(text="Resume")
         print("[INFO] Copy trade paused")
 
-def sync_stratx_net():
+def sync_broker_net():
     broker_object = globals().get("brokerObj")
-    if broker_object is None or not hasattr(broker_object, "sync_stratx_net_from_traded_orders"):
-        print("[WARN] Start algo before syncing StratX net")
+    broker_name = cre.broker.upper()
+    sync_method_name = "sync_stratx_net_from_traded_orders" if broker_name == "STRATX" else "sync_greek_net_from_traded_orders"
+    if broker_object is None or not hasattr(broker_object, sync_method_name):
+        print(f"[WARN] Start algo before syncing {broker_name} net")
         return
 
     def sync_worker():
         try:
             root.after(0, lambda: sync_button.config(state='disabled'))
-            ok = broker_object.sync_stratx_net_from_traded_orders(source="manual")
+            ok = getattr(broker_object, sync_method_name)(source="manual")
             if ok:
-                print("[INFO] StratX net sync completed")
+                print(f"[INFO] {broker_name} net sync completed")
             else:
-                print("[WARN] StratX net sync failed")
+                print(f"[WARN] {broker_name} net sync failed")
         except Exception as e:
-            print(f"[WARN] StratX net sync error: {e}")
+            print(f"[WARN] {broker_name} net sync error: {e}")
         finally:
             root.after(0, lambda: sync_button.config(state='normal'))
 
@@ -95,10 +213,13 @@ def on_close():
                 broker_object.save_stratx_net_state_now()
             if broker_object is not None and hasattr(broker_object, "save_retry_state_now"):
                 broker_object.save_retry_state_now()
-            reconciliation_manager = globals().get("stratx_reconciliation_manager")
-            if reconciliation_manager is not None:
-                reconciliation_manager.save_state_now()
+            if bool(globals().get("STRATX_RECONCILIATION_ENABLED", False)):
+                reconciliation_manager = globals().get("stratx_reconciliation_manager")
+                if reconciliation_manager is not None:
+                    reconciliation_manager.save_state_now()
         elif cre.broker.upper() == "GREEK":
+            if broker_object is not None and hasattr(broker_object, "save_greek_net_state_now"):
+                broker_object.save_greek_net_state_now()
             if broker_object is not None and hasattr(broker_object, "save_retry_state_now"):
                 broker_object.save_retry_state_now()
     except Exception as e:
@@ -167,6 +288,11 @@ subtitle_label = ttk.Label(text_container,
                            foreground="#404750")
 subtitle_label.pack(anchor="center", pady=(4, 0))
 
+info_icon = ttk.Label(root, text="ⓘ", font=("Segoe UI", 16), foreground="#3b82f6", cursor="hand2")
+info_icon.place(relx=1.0, x=-16, y=12, anchor="ne")
+info_icon.bind("<Enter>", show_config_info)
+info_icon.bind("<Leave>", hide_config_info)
+
 # --- Logs Display ---
 logs_card = ttk.Frame(root, padding=20, style="Card.TFrame")
 logs_card.pack(expand=True, fill='both', padx=20, pady=(0, 10))
@@ -211,8 +337,8 @@ algo_button.grid(row=0, column=action_column, padx=4, pady=4)
 pause_button = ttk.Button(button_frame, text="Pause", command=toggle_pause, style="Start.TButton")
 pause_button.grid(row=0, column=action_column + 1, padx=4, pady=4)
 
-if cre.broker.upper() == "STRATX":
-    sync_button = ttk.Button(button_frame, text="Sync Net", command=sync_stratx_net, style="Start.TButton")
+if cre.broker.upper() in ("STRATX", "GREEK"):
+    sync_button = ttk.Button(button_frame, text="Sync Net", command=sync_broker_net, style="Start.TButton")
     sync_button.grid(row=0, column=action_column + 2, padx=4, pady=4)
 
 # Redirect stdout/stderr

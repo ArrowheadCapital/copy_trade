@@ -35,6 +35,7 @@ AccountNumber = getattr(cre, "AccountNumber", None)
 
 class StratX:
 
+    stratx_reconciliation_enabled = False
     inst_df = None
     inst_df_lock = threading.Lock()
     tick_size_by_name = {}
@@ -580,7 +581,7 @@ class StratX:
                 order_meta = self.get_order_meta(root_key)
                 reconciliation_key = str(order_meta.get("reconciliation_key", "")).strip()
                 reconciliation_manager = getattr(self, "reconciliation_manager", None)
-                if reconciliation_key and reconciliation_manager is not None:
+                if self.is_stratx_reconciliation_enabled() and reconciliation_key and reconciliation_manager is not None:
                     reconciliation_manager.mark_correction_failed(root_key, reconciliation_key, reason)
             except Exception as reconciliation_error:
                 printt(f"STRATX_RECON_FAILURE_STATE_ERROR | root_id={root_key} | error={reconciliation_error}")
@@ -637,6 +638,9 @@ class StratX:
             "order_meta_by_root": {},
             "unsettled_by_root": {},
         }
+
+    def is_stratx_reconciliation_enabled(self):
+        return bool(self.stratx_reconciliation_enabled)
     
     def normalize_retry_by_root_state(self, retry_by_root):
         try:
@@ -770,6 +774,7 @@ class StratX:
     def load_retry_state(self):
         try:
             today = self.get_retry_state_date()
+            reconciliation_enabled = self.is_stratx_reconciliation_enabled()
             state = None
             if os.path.exists(StratX.retry_state_file):
                 try:
@@ -793,23 +798,24 @@ class StratX:
                         str(root_id): str(contract_key)
                         for root_id, contract_key in (state.get("unsettled_by_root", {}).items() if isinstance(state.get("unsettled_by_root"), dict) else [])
                         if str(root_id).strip() and str(contract_key).strip()
-                    },
+                    } if reconciliation_enabled else {},
                 }
 
-                referenced_roots = {
-                    str(root_id).strip()
-                    for root_id in state["reference_id_to_root_id"].values()
-                    if str(root_id).strip()
-                }
-                orphaned_unsettled = {
-                    root_id: contract_key
-                    for root_id, contract_key in state["unsettled_by_root"].items()
-                    if root_id not in referenced_roots
-                }
-                for root_id in orphaned_unsettled:
-                    state["unsettled_by_root"].pop(root_id, None)
-                if orphaned_unsettled:
-                    state_needs_save = True
+                if reconciliation_enabled:
+                    referenced_roots = {
+                        str(root_id).strip()
+                        for root_id in state["reference_id_to_root_id"].values()
+                        if str(root_id).strip()
+                    }
+                    orphaned_unsettled = {
+                        root_id: contract_key
+                        for root_id, contract_key in state["unsettled_by_root"].items()
+                        if root_id not in referenced_roots
+                    }
+                    for root_id in orphaned_unsettled:
+                        state["unsettled_by_root"].pop(root_id, None)
+                    if orphaned_unsettled:
+                        state_needs_save = True
 
             with StratX.retry_state_lock:
                 StratX.retry_state = state
@@ -960,6 +966,8 @@ class StratX:
             return None
 
     def register_unsettled_order(self, root_order_id, order_meta):
+        if not self.is_stratx_reconciliation_enabled():
+            return
         root_key = str(root_order_id).strip()
         contract_key = self.get_order_contract_key(order_meta)
         if not root_key or not contract_key:
@@ -973,6 +981,8 @@ class StratX:
         printt(f"STRATX_ORDER_UNSETTLED | root_id={root_key} | contract={contract_key}")
 
     def clear_unsettled_order(self, root_order_id, reason):
+        if not self.is_stratx_reconciliation_enabled():
+            return False
         root_key = str(root_order_id).strip()
         if not root_key:
             return False
@@ -986,6 +996,8 @@ class StratX:
         return True
 
     def settle_unsettled_traded_roots(self, traded_by_root):
+        if not self.is_stratx_reconciliation_enabled():
+            return
         if not isinstance(traded_by_root, dict):
             return
         for root_order_id, traded_quantity in traded_by_root.items():
@@ -993,6 +1005,8 @@ class StratX:
                 self.clear_unsettled_order(root_order_id, "traded")
 
     def get_unsettled_contracts(self):
+        if not self.is_stratx_reconciliation_enabled():
+            return set()
         with StratX.retry_state_lock:
             unsettled = StratX.retry_state.get("unsettled_by_root", {})
             if not isinstance(unsettled, dict):
@@ -1412,7 +1426,7 @@ class StratX:
             request_end_ts = time.perf_counter()
             http_ms = (request_end_ts - request_start_ts) * 1000
 
-            raise RuntimeError(f"StratX order request failed | sym={order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={order_info.get('price')} | order_queue={order_queue_ms:.1f}ms | http={http_ms:.1f}ms | error={e}")
+            raise RuntimeError(f"StratX order request failed | sym={order_info.get('description') or order_info.get('symbol')} | side={order_info.get('side')} | qty={order_info.get('quantity')} | price={order_info.get('price')} | order_queue={order_queue_ms:.1f}ms | http={http_ms:.1f}ms | error={e}")
 
 
     def log_stratx_future_result(self, future):
@@ -1576,8 +1590,10 @@ class StratX:
 
             if normalized_symbol in ("NIFTY", "NIFTY 50"):
                 strike_step = 50
+                itm_offsets = 2
             elif normalized_symbol in ("SENSEX", "BSX"):
                 strike_step = 100
+                itm_offsets = 6
             else:
                 return False
 
@@ -1590,15 +1606,15 @@ class StratX:
             atm_strike = int((underlying_price + strike_step / 2) // strike_step) * strike_step
 
             if option_type == "CE":
-                minimum_allowed_strike = atm_strike - (2 * strike_step)
+                minimum_allowed_strike = atm_strike - (itm_offsets * strike_step)
                 if strike_price < minimum_allowed_strike:
-                    printt(f"Skipping CE beyond 2 ITM offsets | symbol={normalized_symbol} | spot={underlying_price} | atm={atm_strike} | strike={strike_price}")
+                    printt(f"Skipping CE beyond {itm_offsets} ITM offsets | symbol={normalized_symbol} | spot={underlying_price} | atm={atm_strike} | strike={strike_price}")
                     return True
 
             elif option_type == "PE":
-                maximum_allowed_strike = atm_strike + (2 * strike_step)
+                maximum_allowed_strike = atm_strike + (itm_offsets * strike_step)
                 if strike_price > maximum_allowed_strike:
-                    printt(f"Skipping PE beyond 2 ITM offsets | symbol={normalized_symbol} | spot={underlying_price} | atm={atm_strike} | strike={strike_price}")
+                    printt(f"Skipping PE beyond {itm_offsets} ITM offsets | symbol={normalized_symbol} | spot={underlying_price} | atm={atm_strike} | strike={strike_price}")
                     return True
 
             return False
@@ -1747,6 +1763,7 @@ class StratX:
                 client_ids=client_ids,
                 description=description,
                 net_meta=net_meta,
+                source_order_id=order_meta.get("source_order_id", ""),
             )
         except Exception as e:
             printt(f"STRATX_ORDERBOOK_RETRY_SUBMIT_FAILED | root_id={root_order_id} | error={e}")
@@ -1890,8 +1907,10 @@ class StratX:
         except Exception as e:
             printt(f"Error in retry_failed_orderbook_orders: {e}")
 
-    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez, lot_size=None, csv_read_ts=None, timing_ctx=None, root_order_id=None, client_ids=None, description=None, net_meta=None, reconciliation_key=None):
+    def place_stratx_single_order(self, url, strategy_name, symbol, strike, expiry, side, quantity, price, exchange, segment, right, freez, lot_size=None, csv_read_ts=None, timing_ctx=None, root_order_id=None, client_ids=None, description=None, net_meta=None, reconciliation_key=None, source_order_id=""):
         try:
+            if reconciliation_key and not self.is_stratx_reconciliation_enabled():
+                return []
             submitted_future = False
             reserved_net_meta = None
             is_new_root_order = root_order_id is None
@@ -1946,7 +1965,7 @@ class StratX:
                         "lmt_order_extend_lmt": 1000,
                         "sectype": "IND",
                         "right": right,
-                        "trigger": "Entry",
+                        "trigger": str(source_order_id).strip() or "Entry",
                         "quantity_split": freez,
                         "order_action": ""
                     }
@@ -1971,6 +1990,7 @@ class StratX:
                 "right": right,
                 "strategy_name": strategy_name,
                 "description": description,
+                "source_order_id": str(source_order_id).strip(),
             }
             if reconciliation_key:
                 order_meta["reconciliation_key"] = str(reconciliation_key)
@@ -2102,6 +2122,7 @@ class StratX:
                 tick_size = float(row.iat[0])
 
             description = str(trade[7]).strip()
+            source_order_id = str(trade[23]).strip()
             inst_type = str(trade[2]).strip().upper()
 
             cache_symbol = None
@@ -2141,7 +2162,7 @@ class StratX:
                 vol_qty = qty * 2
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry_yyyymmdd, side, vol_qty, price,
-                    "NSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description
+                    "NSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description, source_order_id=source_order_id
                 ))
 
                 # otm_strike = self.get_otm_strike(name, right, strike, offset=1)
@@ -2187,13 +2208,13 @@ class StratX:
                     timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, otm_strike, expiry_yyyymmdd, side, qty, otm_price,
-                    "NSEFO", "NFO-OPT", right, freez, lot_size, csv_read_ts, timing_ctx, description=otm_description
+                    "NSEFO", "NFO-OPT", right, freez, lot_size, csv_read_ts, timing_ctx, description=otm_description, source_order_id=source_order_id
                 ))
 
             else:
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry_yyyymmdd, side, qty, price,
-                    "NSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description
+                    "NSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description, source_order_id=source_order_id
                 ))
 
             return iids
@@ -2214,6 +2235,7 @@ class StratX:
 
             exchange_instrument_id = str(trade[4]).strip()
             description = str(trade[5]).strip()
+            source_order_id = str(trade[16]).strip()
 
             symbol, strike, expiry, right, tick_size, lot_size = self.get_bse_contract_details(exchange_instrument_id)
 
@@ -2269,7 +2291,7 @@ class StratX:
                 vol_qty = qty * 2
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry, side, vol_qty, price,
-                    "BSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description
+                    "BSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description, source_order_id=source_order_id
                 ))
 
                 # otm_strike = self.get_otm_strike(symbol, right, strike, offset=1)
@@ -2315,13 +2337,13 @@ class StratX:
                     timing_ctx["price_calc_ms"] = timing_ctx.get("price_calc_ms", 0.0) + ((time.perf_counter() - _otm_price_t0) * 1000)
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, otm_strike, expiry, side, qty, otm_price,
-                    "BSEFO", "BFO-OPT", right, freez, lot_size, csv_read_ts, timing_ctx, description=otm_description
+                    "BSEFO", "BFO-OPT", right, freez, lot_size, csv_read_ts, timing_ctx, description=otm_description, source_order_id=source_order_id
                 ))
 
             else:
                 iids.extend(self.place_stratx_single_order(
                     url, strategy_name, name, strike, expiry, side, qty, price,
-                    "BSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description
+                    "BSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description, source_order_id=source_order_id
                 ))
 
             return iids

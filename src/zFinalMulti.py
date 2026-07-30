@@ -11,7 +11,6 @@ import threading
 import pandas as pd
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
-from src.stratx.stratx_reconciliation import StratXReconciliation
 try:
     from src.utils.file_watcher import start_file_watcher
     file_watcher_import_error = None
@@ -32,6 +31,10 @@ H.createLogFile()
 H.checkTime(datetime.time(5, 15, 1))
 
 BROKER = cre.broker.upper()
+STRATX_RECONCILIATION_ENABLED = False
+StratXReconciliation = None
+if BROKER == "STRATX" and STRATX_RECONCILIATION_ENABLED:
+    from src.stratx.stratx_reconciliation import StratXReconciliation
 
 H.printt(f"Broker: {BROKER}")
 
@@ -54,6 +57,7 @@ if BROKER == "GREEK":
     brokerObj = HG.greeksoft()
 elif BROKER == "STRATX":
     brokerObj = HG.StratX()
+    brokerObj.stratx_reconciliation_enabled = STRATX_RECONCILIATION_ENABLED
 else:
     raise ValueError("Invalid broker name in credentials.py")
 
@@ -70,22 +74,45 @@ MAX_WORKERS = 5
 POLL_INTERVAL = 0.25
 ALLOWED_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
 COPY_SOURCE_ID = str(getattr(cre, "copy_source_id", "")).strip().upper()
+source_strategy_names_config = getattr(cre, "source_strategy_names", [])
+COPY_SOURCE_STRATEGY_NAMES = {
+    str(name).strip().upper()
+    for name in source_strategy_names_config
+    if str(name).strip()
+} if isinstance(source_strategy_names_config, (list, tuple, set)) else set()
 COPY_ALLOWED_DELAY_SECONDS = float(os.getenv("COPY_ALLOWED_DELAY_SECONDS", "0") or 0)
 RECON_INTERVAL_SECONDS = 5
 RECON_REQUIRED_CONFIRMATIONS = 5
 RECON_COOLDOWN_SECONDS = 60
-RECON_REPORT_ONLY = False
+RECON_REPORT_ONLY = True
 RECON_STATE_FILE = "stratx_recon_state.json"
+
+NSE_EXPECTED_HEADER = (
+    "Trade Number", "Trade Status", "Instrument Name", "Symbol", "Expiry date",
+    "Strike Price", "Option Type", "SecurityDesc", "Book Type", "Book Type Name",
+    "Market Type", "Trader/User Id", "BranchId", "BuySell", "Trade Qty",
+    "Trade Price", "Pro/Client", "BrokerId/AccountNo", "Participant/Broker Id",
+    "Open/Close Flag", "Cover/Uncover Flag", "Trade DateTime", "Last Modified time",
+    "Exch.Order Number", "NIL", "Last Modified time", "StrategyName", "ExchRetailerId",
+)
+
+BSE_EXPECTED_HEADER = (
+    "Blank", "Blank", "ProductCode", "ProductType", "lToken", "Script", "BuySell",
+    "Trade Qty", "Trade Price", "BrokerId or AccountNo", "Pro/Cli", "InstId",
+    "Trade Entry Dt", "Trade Entry Time", "Trade Modified Dt", "Trade Modified Time",
+    "order number", "BookType", "InstrumentName", "Blank", "GreekClientId",
+    "CarryForWard", "StrategyName", "Exch Retailer Id",
+)
 
 # Risk limits (commented out for now, can enable later)
 # MAX_POSITION_VALUE = 5000000
 # DAILY_LOSS_LIMIT = -50000
 
 # ================= HELPER FUNCTIONS =================
-def read_csv_safely(path, sep=',', max_retries=3):
+def read_csv_safely(path, sep=',', max_retries=3, skiprows=0):
     for attempt in range(max_retries):
         try:
-            df = pd.read_csv(path, header=None, engine="python", sep=sep, on_bad_lines='skip')
+            df = pd.read_csv(path, header=None, engine="python", sep=sep, skiprows=skiprows, on_bad_lines='skip')
             return df if not df.empty else None
         
         except pd.errors.EmptyDataError:
@@ -99,6 +126,27 @@ def read_csv_safely(path, sep=',', max_retries=3):
                 return None
             
     return None
+
+
+def validate_source_header(path, sep, expected_header, source):
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as source_file:
+            first_line = source_file.readline()
+
+        if not first_line.strip():
+            return None
+
+        actual_header = tuple(value.strip() for value in first_line.rstrip("\r\n").split(sep))
+        if actual_header != expected_header:
+            H.printt(f"{source} header mismatch - copying disabled for this run")
+            return False
+
+        H.printt(f"{source} header validated")
+        return True
+
+    except Exception as e:
+        H.printt(f"{source} header validation error | error={e}")
+        return None
 
 
 def validate_trade(symbol, qty, strike=None, max_qty=50000):
@@ -119,11 +167,20 @@ def validate_trade(symbol, qty, strike=None, max_qty=50000):
         return False
 
 
-def is_copy_row_allowed(row_id, row_dt, source):
+def is_copy_row_allowed(row_id, strategy_name, row_dt, source):
     try:
+        if not COPY_SOURCE_ID or not COPY_SOURCE_STRATEGY_NAMES:
+            H.printt(f"{source} copy filter configuration missing")
+            return False
+
         actual_id = str(row_id).strip().upper()
-        if COPY_SOURCE_ID and actual_id != COPY_SOURCE_ID:
+        if actual_id != COPY_SOURCE_ID:
             H.printt(f"{source} skip source id | expected={COPY_SOURCE_ID} | actual={actual_id}")
+            return False
+
+        actual_strategy_name = str(strategy_name).strip().upper()
+        if actual_strategy_name not in COPY_SOURCE_STRATEGY_NAMES:
+            H.printt(f"{source} skip strategy name | expected={sorted(COPY_SOURCE_STRATEGY_NAMES)} | actual={actual_strategy_name}")
             return False
 
         diff = abs((datetime.datetime.now() - row_dt).total_seconds())
@@ -299,7 +356,7 @@ def nse_worker():
                 dt = brokerObj.getData(t)
                 execute_with_retry(
                         brokerObj.placeOrder,
-                        [dt.GreekToken, side, dt.Symbol, int(qty/dt.LotSize), qty, dt],
+                        [dt.GreekToken, side, dt.Symbol, int(qty/dt.LotSize), qty, dt, str(t[23]).strip()],
                         dt.LotSize
                     )
             else:
@@ -365,7 +422,7 @@ def bse_worker():
                 dt = brokerObj.getDataBSE(t[4])
                 execute_with_retry(
                         brokerObj.placeOrderBSE,
-                        [dt.GreekToken, 'Buy' if side_flag=='B' else 'Sell', dt.Symbol, int(qty/dt.LotSize), qty, dt],
+                        [dt.GreekToken, 'Buy' if side_flag=='B' else 'Sell', dt.Symbol, int(qty/dt.LotSize), qty, dt, str(t[16]).strip()],
                         dt.LotSize
                     )
             else:
@@ -390,6 +447,10 @@ if BROKER == "STRATX":
     brokerObj.sync_stratx_net_from_traded_orders(source="startup")
     brokerObj.start_retry_state_saver()
     brokerObj.warmup_stratx_sessions()
+elif BROKER == "GREEK":
+    brokerObj.load_greek_net_state()
+    brokerObj.start_greek_net_state_saver()
+    brokerObj.sync_greek_net_from_traded_orders(source="startup")
 
 # ================= START 40 WORKERS =================
 NSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -406,17 +467,23 @@ last_nse = pd.DataFrame()
 last_bse = pd.DataFrame()
 nse_last_mtime = 0
 bse_last_mtime = 0
+nse_header_valid = None
+bse_header_valid = None
 csv_state_lock = threading.Lock()
 
 # NSE
 if os.path.exists(csvPathNSE):
     try:
-        df_init = pd.read_csv(csvPathNSE, header=None, engine="python")
-        # df_init = df_init[df_init[17].str.strip() == cre.clientCodeToCopy]
-        nse_seen = len(df_init)
-        last_nse = df_init
-        nse_last_mtime = os.path.getmtime(csvPathNSE)
-        H.printt(f"NSE copy starts from row {nse_seen}")
+        nse_header_valid = validate_source_header(csvPathNSE, ",", NSE_EXPECTED_HEADER, "NSE")
+        if nse_header_valid:
+            df_init = pd.read_csv(csvPathNSE, header=None, engine="python", skiprows=1)
+            nse_seen = len(df_init)
+            last_nse = df_init
+            H.printt(f"NSE copy starts from data row {nse_seen}")
+        else:
+            nse_seen = 0
+        if nse_header_valid is not None:
+            nse_last_mtime = os.path.getmtime(csvPathNSE)
     except pd.errors.EmptyDataError:
         nse_seen = 0
     except Exception as e:
@@ -428,12 +495,16 @@ else:
 # BSE
 if os.path.exists(csvPathBSE):
     try:
-        df_init = pd.read_csv(csvPathBSE, sep="|", header=None)
-        # df_init = df_init[df_init[9].str.strip() == cre.clientCodeToCopy]
-        bse_seen = len(df_init)
-        last_bse = df_init
-        bse_last_mtime = os.path.getmtime(csvPathBSE)
-        H.printt(f"BSE copy starts from row {bse_seen}")
+        bse_header_valid = validate_source_header(csvPathBSE, "|", BSE_EXPECTED_HEADER, "BSE")
+        if bse_header_valid:
+            df_init = pd.read_csv(csvPathBSE, sep="|", header=None, skiprows=1)
+            bse_seen = len(df_init)
+            last_bse = df_init
+            H.printt(f"BSE copy starts from data row {bse_seen}")
+        else:
+            bse_seen = 0
+        if bse_header_valid is not None:
+            bse_last_mtime = os.path.getmtime(csvPathBSE)
     except pd.errors.EmptyDataError:
         bse_seen = 0
     except Exception as e:
@@ -444,16 +515,31 @@ else:
 
 
 def process_nse_csv():
-    global nse_seen, last_nse, nse_last_mtime
+    global nse_seen, last_nse, nse_last_mtime, nse_header_valid
     if not os.path.exists(csvPathNSE):
         return
     try:
+        if nse_header_valid is False:
+            return
+
         current_mtime = os.path.getmtime(csvPathNSE)
         with csv_state_lock:
             if current_mtime <= nse_last_mtime:
                 return
 
-        df = read_csv_safely(csvPathNSE)
+        if nse_header_valid is None:
+            header_valid = validate_source_header(csvPathNSE, ",", NSE_EXPECTED_HEADER, "NSE")
+            if header_valid is None:
+                return
+            with csv_state_lock:
+                if nse_header_valid is None:
+                    nse_header_valid = header_valid
+            if not nse_header_valid:
+                with csv_state_lock:
+                    nse_last_mtime = current_mtime
+                return
+
+        df = read_csv_safely(csvPathNSE, skiprows=1)
         if df is None:
             return
 
@@ -488,7 +574,7 @@ def process_nse_csv():
                     continue
 
                 row_dt = datetime.datetime.strptime(str(row[25]).strip(), "%d %b %Y %H:%M:%S")
-                if is_copy_row_allowed(row[27], row_dt, "NSE"):
+                if is_copy_row_allowed(row[27], row[26], row_dt, "NSE"):
                     allowed_rows.append(row)
             except Exception as e:
                 H.printt(f"NSE copy filter error | error={e}")
@@ -528,16 +614,31 @@ def process_nse_csv():
 
 
 def process_bse_csv():
-    global bse_seen, last_bse, bse_last_mtime
+    global bse_seen, last_bse, bse_last_mtime, bse_header_valid
     if not os.path.exists(csvPathBSE):
         return
     try:
+        if bse_header_valid is False:
+            return
+
         current_mtime = os.path.getmtime(csvPathBSE)
         with csv_state_lock:
             if current_mtime <= bse_last_mtime:
                 return
 
-        df = read_csv_safely(csvPathBSE, sep="|")
+        if bse_header_valid is None:
+            header_valid = validate_source_header(csvPathBSE, "|", BSE_EXPECTED_HEADER, "BSE")
+            if header_valid is None:
+                return
+            with csv_state_lock:
+                if bse_header_valid is None:
+                    bse_header_valid = header_valid
+            if not bse_header_valid:
+                with csv_state_lock:
+                    bse_last_mtime = current_mtime
+                return
+
+        df = read_csv_safely(csvPathBSE, sep="|", skiprows=1)
         if df is None:
             return
 
@@ -575,7 +676,7 @@ def process_bse_csv():
                     f"{str(row[14]).strip()} {str(row[15]).strip()}",
                     "%d/%m/%Y %H:%M:%S",
                 )
-                if is_copy_row_allowed(row[-1], row_dt, "BSE"):
+                if is_copy_row_allowed(row[-1], row[-2], row_dt, "BSE"):
                     allowed_rows.append(row)
             except Exception as e:
                 H.printt(f"BSE copy filter error | error={e}")
@@ -630,7 +731,7 @@ else:
     H.printt("File watcher failed to start - fallback polling active")
 
 stratx_reconciliation_manager = None
-if BROKER == "STRATX":
+if BROKER == "STRATX" and STRATX_RECONCILIATION_ENABLED:
     try:
         stratx_reconciliation_manager = StratXReconciliation(
             broker=brokerObj,

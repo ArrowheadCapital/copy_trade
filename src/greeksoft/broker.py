@@ -33,7 +33,8 @@ AccountNumber = getattr(cre, "AccountNumber", None)
 # =========================== COMMON FUNCTIONS ==================================
 greek_rate_lock = threading.Lock()
 greek_order_timestamps = deque()
-MAX_GREEK_ORDERS_PER_SEC = 9
+MAX_GREEK_ORDERS_PER_WINDOW = 9
+GREEK_RATE_WINDOW_SECONDS = 1.2
 
 
 def wait_for_greek_order_slot():
@@ -41,14 +42,14 @@ def wait_for_greek_order_slot():
         with greek_rate_lock:
             now = time.time()
 
-            while greek_order_timestamps and now - greek_order_timestamps[0] >= 1:
+            while greek_order_timestamps and now - greek_order_timestamps[0] >= GREEK_RATE_WINDOW_SECONDS:
                 greek_order_timestamps.popleft()
 
-            if len(greek_order_timestamps) < MAX_GREEK_ORDERS_PER_SEC:
+            if len(greek_order_timestamps) < MAX_GREEK_ORDERS_PER_WINDOW:
                 greek_order_timestamps.append(now)
                 return
 
-            wait_time = 1 - (now - greek_order_timestamps[0])
+            wait_time = GREEK_RATE_WINDOW_SECONDS - (now - greek_order_timestamps[0])
             printt(f"RATE LIMIT HIT | waiting {wait_time:.3f}s")
 
         time.sleep(max(wait_time, 0.01))
@@ -97,6 +98,9 @@ class greeksoft:
     greek_retry_state_file = "greek_state.json"
     greek_retry_state_save_interval = 1
     max_greek_orderbook_retries = 1
+    greek_net_state_file = "greek_net_state.json"
+    greek_net_state_save_interval = 1
+    greek_net_buckets = ("NIFTY_CE", "NIFTY_PE", "SENSEX_CE", "SENSEX_PE")
 
     def __init__(self):
         global username
@@ -109,6 +113,12 @@ class greeksoft:
         self.greek_retry_state_loaded = False
         self.greek_retry_state_saver_started = False
         self.greek_retry_state = {}
+        self.greek_net_lock = threading.Lock()
+        self.greek_net_state_save_lock = threading.Lock()
+        self.greek_net_state_dirty = False
+        self.greek_net_state_saver_started = False
+        self.greek_net_position = {bucket: 0 for bucket in self.greek_net_buckets}
+        self.greek_net_released_roots = set()
         self.greek_nse_contract_by_key = {}
         self.greek_bse_contract_by_token = {}
         initialized = False
@@ -255,6 +265,300 @@ class greeksoft:
 
     def get_greek_retry_state_date(self):
         return datetime.datetime.now().strftime("%Y%m%d")
+
+
+    def get_greek_net_bucket(self, symbol, option_type):
+        try:
+            normalized_symbol = str(symbol).strip().replace(" ", "").upper()
+            normalized_option_type = str(option_type).strip().upper()
+            if normalized_symbol in ("NIFTY", "SENSEX") and normalized_option_type in ("CE", "PE"):
+                return f"{normalized_symbol}_{normalized_option_type}"
+            return None
+        except Exception as e:
+            printt(f"GREEK_NET_BUCKET_ERROR | symbol={symbol} | option_type={option_type} | error={e}")
+            return None
+
+
+    def get_greek_net_limit(self, bucket):
+        try:
+            pos_limit = max(int(float(getattr(cre, f"{bucket}_POS_NET"))), 0)
+        except Exception:
+            pos_limit = 0
+        try:
+            neg_limit = max(int(float(getattr(cre, f"{bucket}_NEG_NET"))), 0)
+        except Exception:
+            neg_limit = 0
+        return pos_limit, neg_limit
+
+
+    def get_greek_signed_qty(self, side, qty):
+        normalized_side = self.normalize_order_side(side)
+        quantity = int(float(qty))
+        return quantity if normalized_side == "BUY" else -quantity
+
+
+    def floor_greek_qty_to_lot(self, qty, lot_size):
+        try:
+            quantity = int(float(qty))
+            lot_quantity = int(float(lot_size))
+            if lot_quantity <= 0:
+                return 0
+            return max((quantity // lot_quantity) * lot_quantity, 0)
+        except Exception as e:
+            printt(f"GREEK_NET_LOT_FLOOR_ERROR | qty={qty} | lot_size={lot_size} | error={e}")
+            return 0
+
+
+    def load_greek_net_state(self):
+        try:
+            today = self.get_greek_retry_state_date()
+            state = None
+            if os.path.exists(self.greek_net_state_file):
+                try:
+                    with open(self.greek_net_state_file, "r") as state_file:
+                        state = json.load(state_file)
+                except Exception as e:
+                    printt(f"GREEK_NET_STATE_LOAD_FAILED | error={e}")
+
+            with self.greek_net_lock:
+                if not isinstance(state, dict) or state.get("date") != today:
+                    self.greek_net_position = {bucket: 0 for bucket in self.greek_net_buckets}
+                    self.greek_net_released_roots.clear()
+                    self.greek_net_state_dirty = True
+                    printt("GREEK_NET_STATE_RESET")
+                    return
+
+                saved_position = state.get("net_position", {})
+                for bucket in self.greek_net_buckets:
+                    try:
+                        self.greek_net_position[bucket] = int(float(saved_position.get(bucket, 0)))
+                    except Exception:
+                        self.greek_net_position[bucket] = 0
+
+                released_roots = state.get("released_roots", [])
+                self.greek_net_released_roots = {str(root_id).strip() for root_id in released_roots if str(root_id).strip()} if isinstance(released_roots, list) else set()
+
+            printt(f"GREEK_NET_STATE_LOADED | net={dict(self.greek_net_position)} | released={len(self.greek_net_released_roots)}")
+        except Exception as e:
+            printt(f"Error loading GreekSoft net state: {e}")
+
+
+    def get_greek_net_state_snapshot_locked(self):
+        return {"date": self.get_greek_retry_state_date(), "net_position": dict(self.greek_net_position), "released_roots": sorted(self.greek_net_released_roots)}
+
+
+    def save_greek_net_state_now(self):
+        with self.greek_net_state_save_lock:
+            try:
+                with self.greek_net_lock:
+                    state_snapshot = self.get_greek_net_state_snapshot_locked()
+                    self.greek_net_state_dirty = False
+
+                temp_path = f"{self.greek_net_state_file}.tmp"
+                with open(temp_path, "w") as state_file:
+                    json.dump(state_snapshot, state_file, indent=2)
+                os.replace(temp_path, self.greek_net_state_file)
+            except Exception as e:
+                with self.greek_net_lock:
+                    self.greek_net_state_dirty = True
+                printt(f"GREEK_NET_STATE_SAVE_FAILED | error={e}")
+
+
+    def greek_net_state_saver_loop(self):
+        while True:
+            try:
+                time.sleep(self.greek_net_state_save_interval)
+                with self.greek_net_lock:
+                    should_save = self.greek_net_state_dirty
+                if should_save:
+                    self.save_greek_net_state_now()
+            except Exception as e:
+                printt(f"GREEK_NET_STATE_SAVER_ERROR | error={e}")
+                time.sleep(1)
+
+
+    def start_greek_net_state_saver(self):
+        try:
+            with self.greek_net_lock:
+                if self.greek_net_state_saver_started:
+                    return
+                self.greek_net_state_saver_started = True
+
+            threading.Thread(target=self.greek_net_state_saver_loop, daemon=True, name="greek_net_state_saver").start()
+            atexit.register(self.save_greek_net_state_now)
+            printt("GREEK_NET_STATE_SAVER_STARTED")
+        except Exception as e:
+            printt(f"Error starting GreekSoft net state saver: {e}")
+
+
+    def get_greek_traded_quantity(self, row):
+        try:
+            quantity = int(float(self.get_orderbook_row_value(row, "traded_qty", 0)))
+            return quantity if quantity > 0 else 0
+        except Exception as e:
+            printt(f"GREEK_NET_SYNC_QTY_PARSE_FAILED | error={e} | row={row}")
+            return 0
+
+
+    def build_greek_net_from_orderbook(self, rows):
+        net_position = {bucket: 0 for bucket in self.greek_net_buckets}
+        seen_gorderids = set()
+        counted = 0
+
+        if not isinstance(rows, list):
+            return None, 0
+
+        for row in rows:
+            try:
+                if str(self.get_orderbook_row_value(row, "instrument", "")).strip().upper() != "OPTIDX":
+                    continue
+
+                gorderid = str(self.get_orderbook_row_value(row, "gorderid", "")).strip()
+                if not gorderid or gorderid in seen_gorderids:
+                    continue
+
+                quantity = self.get_greek_traded_quantity(row)
+                if quantity <= 0:
+                    continue
+
+                bucket = self.get_greek_net_bucket(self.get_orderbook_row_value(row, "scripName", ""), self.get_orderbook_row_value(row, "optionType", ""))
+                if not bucket:
+                    continue
+
+                net_position[bucket] += self.get_greek_signed_qty(self.get_orderbook_row_value(row, "side", ""), quantity)
+                seen_gorderids.add(gorderid)
+                counted += 1
+            except Exception as e:
+                printt(f"GREEK_NET_SYNC_ROW_SKIPPED | error={e} | row={row}")
+
+        return net_position, counted
+
+
+    def log_greek_net_over_limit(self, net_position, source):
+        for bucket, current_net in net_position.items():
+            pos_limit, neg_limit = self.get_greek_net_limit(bucket)
+            if current_net > pos_limit or current_net < -neg_limit:
+                printt(f"GREEK_NET_SYNC_OVER_LIMIT | source={source} | bucket={bucket} | net={current_net} | pos_limit={pos_limit} | neg_limit={neg_limit}")
+
+
+    def sync_greek_net_from_traded_orders(self, source="manual"):
+        try:
+            with self.greek_net_lock:
+                orderbook = self.getOrderBookALL()
+                rows = orderbook.get("data") if isinstance(orderbook, dict) else None
+                net_position, counted = self.build_greek_net_from_orderbook(rows)
+                if net_position is None:
+                    printt(f"GREEK_NET_SYNC_FAILED | source={source} | reason=missing_data_list")
+                    return False
+
+                self.greek_net_position = {bucket: int(net_position.get(bucket, 0)) for bucket in self.greek_net_buckets}
+                self.greek_net_released_roots.clear()
+                self.greek_net_state_dirty = True
+                synced_net = dict(self.greek_net_position)
+
+            self.log_greek_net_over_limit(synced_net, source)
+            self.save_greek_net_state_now()
+            printt(f"GREEK_NET_SYNC_DONE | source={source} | rows={counted} | net={synced_net}")
+            return True
+        except Exception as e:
+            printt(f"GREEK_NET_SYNC_FAILED | source={source} | error={e}")
+            return False
+
+
+    def reserve_greek_net(self, symbol, option_type, side, qty, lot_size):
+        try:
+            bucket = self.get_greek_net_bucket(symbol, option_type)
+            original_qty = int(float(qty))
+            if not bucket:
+                return True, original_qty, None
+            if original_qty <= 0:
+                printt(f"GREEK_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={qty} | reason=non_positive_qty")
+                return False, 0, None
+
+            pos_limit, neg_limit = self.get_greek_net_limit(bucket)
+            signed_qty = self.get_greek_signed_qty(side, original_qty)
+            with self.greek_net_lock:
+                current_net = int(self.greek_net_position.get(bucket, 0))
+                requested_next_net = current_net + signed_qty
+
+                if current_net > pos_limit:
+                    if signed_qty >= 0:
+                        printt(f"GREEK_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={requested_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | reason=over_positive_increase")
+                        return False, 0, None
+                    adjusted_qty = min(original_qty, self.floor_greek_qty_to_lot(current_net + neg_limit, lot_size))
+                elif current_net < -neg_limit:
+                    if signed_qty <= 0:
+                        printt(f"GREEK_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={requested_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | reason=over_negative_increase")
+                        return False, 0, None
+                    adjusted_qty = min(original_qty, self.floor_greek_qty_to_lot(pos_limit - current_net, lot_size))
+                elif -neg_limit <= requested_next_net <= pos_limit:
+                    adjusted_qty = original_qty
+                else:
+                    max_allowed_qty = pos_limit - current_net if signed_qty > 0 else current_net + neg_limit
+                    adjusted_qty = self.floor_greek_qty_to_lot(max_allowed_qty, lot_size)
+
+                if adjusted_qty <= 0:
+                    printt(f"GREEK_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | current={current_net} | next={requested_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size} | reason=no_valid_partial")
+                    return False, 0, None
+
+                adjusted_signed_qty = self.get_greek_signed_qty(side, adjusted_qty)
+                adjusted_next_net = current_net + adjusted_signed_qty
+                if adjusted_next_net > pos_limit and adjusted_next_net >= current_net:
+                    printt(f"GREEK_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | next={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | reason=partial_still_exceeds")
+                    return False, 0, None
+                if adjusted_next_net < -neg_limit and adjusted_next_net <= current_net:
+                    printt(f"GREEK_NET_LIMIT_SKIP | bucket={bucket} | side={side} | qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | next={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | reason=partial_still_exceeds")
+                    return False, 0, None
+
+                self.greek_net_position[bucket] = adjusted_next_net
+                self.greek_net_state_dirty = True
+
+            if adjusted_qty != original_qty:
+                printt(f"GREEK_NET_PARTIAL_ALLOWED | bucket={bucket} | side={side} | original_qty={original_qty} | adjusted_qty={adjusted_qty} | current={current_net} | requested_next={requested_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit} | lot_size={lot_size}")
+            printt(f"GREEK_NET_RESERVED | bucket={bucket} | signed_qty={adjusted_signed_qty} | current={adjusted_next_net} | pos_limit={pos_limit} | neg_limit={neg_limit}")
+            return True, adjusted_qty, {"bucket": bucket, "signed_qty": adjusted_signed_qty}
+        except Exception as e:
+            printt(f"GREEK_NET_RESERVE_ERROR | symbol={symbol} | option_type={option_type} | side={side} | qty={qty} | error={e}")
+            return False, 0, None
+
+
+    def adjust_greek_net_for_failed_task(self, task, quantity, reason, log_name):
+        try:
+            root_order_id = str(task.get("root_order_id", "")).strip()
+            net_meta = task.get("net_meta")
+            if not root_order_id or not isinstance(net_meta, dict):
+                return False
+
+            bucket = str(net_meta.get("bucket", "")).strip().upper()
+            if bucket not in self.greek_net_buckets:
+                return False
+
+            signed_qty = self.get_greek_signed_qty(task.get("side"), quantity)
+            with self.greek_net_lock:
+                if root_order_id in self.greek_net_released_roots:
+                    return False
+                current_net = int(self.greek_net_position.get(bucket, 0))
+                next_net = current_net - signed_qty
+                self.greek_net_position[bucket] = next_net
+                self.greek_net_released_roots.add(root_order_id)
+                self.greek_net_state_dirty = True
+
+            printt(f"{log_name} | root_id={root_order_id} | bucket={bucket} | signed_qty={signed_qty} | current={next_net} | reason={reason}")
+            return True
+        except Exception as e:
+            printt(f"GREEK_NET_FAILURE_ADJUST_ERROR | root_id={task.get('root_order_id')} | reason={reason} | error={e}")
+            return False
+
+
+    def handle_greek_order_future_result(self, future, task):
+        try:
+            if future.result():
+                return
+            source = str(task.get("source", "")).strip().lower()
+            log_name = "GREEK_NET_RELEASE" if source == "retry" else "GREEK_NET_ROLLBACK"
+            self.adjust_greek_net_for_failed_task(task, task.get("qty", 0), f"{source}_submit_failed", log_name)
+        except Exception as e:
+            printt(f"GREEK_ORDER_FUTURE_RESULT_ERROR | root_id={task.get('root_order_id')} | source={task.get('source')} | error={e}")
 
 
     def get_empty_greek_retry_state(self):
@@ -516,7 +820,9 @@ class greeksoft:
             return 0
 
 
-    def create_original_greek_order_task(self, exchange, gtoken, side, trade_symbol, qty, dt):
+    def create_original_greek_order_task(self, exchange, gtoken, side, trade_symbol, qty, dt, source_order_id=""):
+        root_order_id = str(uuid.uuid4())
+        net_meta = None
         try:
             quantity = int(qty)
             lot_size = int(dt.LotSize)
@@ -527,7 +833,13 @@ class greeksoft:
             symbol = str(dt.Symbol).strip().upper()
             cache_symbol = self.build_greek_cache_symbol(dt)
 
-            root_order_id = str(uuid.uuid4())
+            net_allowed, adjusted_quantity, net_meta = self.reserve_greek_net(symbol, option_type, side, quantity, lot_size)
+            if not net_allowed:
+                return None
+            if adjusted_quantity != quantity:
+                printt(f"GREEK_NET_ORDER_QTY_ADJUSTED | sym={symbol} | option_type={option_type} | side={side} | original_qty={quantity} | adjusted_qty={adjusted_quantity}")
+                quantity = adjusted_quantity
+
             task = {
                 "root_order_id": root_order_id,
                 "source": "original",
@@ -544,10 +856,15 @@ class greeksoft:
                 "strike": strike,
                 "tick_size": tick_size,
                 "cache_symbol": cache_symbol,
+                "source_order_id": str(source_order_id).strip(),
+                "net_meta": net_meta,
             }
             self.register_greek_order_meta(root_order_id, task)
             return task
         except Exception as e:
+            if isinstance(net_meta, dict):
+                failed_task = {"root_order_id": root_order_id, "side": side, "net_meta": net_meta}
+                self.adjust_greek_net_for_failed_task(failed_task, quantity, "original_task_build_failed", "GREEK_NET_ROLLBACK")
             printt(f"GREEK_ORIGINAL_TASK_BUILD_FAILED | exchange={exchange} | sym={trade_symbol} | qty={qty} | error={e}")
             return None
 
@@ -573,6 +890,8 @@ class greeksoft:
                         "exchange": str(task["exchange"]),
                         "disclosed_qty": "0",
                         "tradeSymbol": str(task["tradeSymbol"]).upper(),
+                        "tag": str(task.get("source_order_id", "")),
+                        "userTag": str(task.get("source_order_id", "")),
                         "lot": str(task["lot"]),
                         "order_type": order_type,
                         "product": "0",
@@ -645,22 +964,26 @@ class greeksoft:
 
                 self.register_greek_order_id(task.get("root_order_id"), gorderid)
                 total_ms = (time.perf_counter() - request_start_ts) * 1000
-                printt(f"GREEK_ORDER_SUBMIT_DONE | root_id={task.get('root_order_id')} | source={task.get('source')} | gorderid={gorderid} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | price={payload_price} | order_type={order_type} | http={http_ms:.1f}ms | total={total_ms:.1f}ms")
+                printt(f"GREEK_ORDER_SUBMIT_DONE | root_id={task.get('root_order_id')} | source={task.get('source')} | gorderid={gorderid} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | price={payload_price} | order_type={order_type} | http={http_ms:.1f}ms | total={total_ms:.1f}ms")
                 return gorderid
 
             return None
         except Exception as e:
             total_ms = (time.perf_counter() - request_start_ts) * 1000
-            printt(f"GREEK_ORDER_SUBMIT_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | total={total_ms:.1f}ms | error={e}")
+            printt(f"GREEK_ORDER_SUBMIT_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | total={total_ms:.1f}ms | error={e}")
             return None
 
 
     def enqueue_greek_order_task(self, task):
         try:
             future = self.greek_order_pool.submit(self.submit_greek_order_task, task)
+            future.add_done_callback(lambda completed_future, order_task=dict(task): self.handle_greek_order_future_result(completed_future, order_task))
             return future
         except Exception as e:
             printt(f"GREEK_ORDER_ENQUEUE_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | error={e}")
+            source = str(task.get("source", "")).strip().lower()
+            log_name = "GREEK_NET_RELEASE" if source == "retry" else "GREEK_NET_ROLLBACK"
+            self.adjust_greek_net_for_failed_task(task, task.get("qty", 0), f"{source}_enqueue_failed", log_name)
             return None
 
 
@@ -715,6 +1038,16 @@ class greeksoft:
             return False
 
 
+    def is_terminal_failed_greek_orderbook_row(self, row):
+        try:
+            status = str(self.get_orderbook_row_value(row, "order_status", "")).strip().upper()
+            pending_qty = int(float(self.get_orderbook_row_value(row, "pending_qty", 0)))
+            return status == "EXCHANGE REJECTED" and pending_qty > 0
+        except Exception as e:
+            printt(f"GREEK_TERMINAL_STATUS_CHECK_FAILED | error={e} | row={row}")
+            return False
+
+
     def build_greek_retry_task(self, row, root_order_id):
         try:
             order_meta = self.get_greek_order_meta(root_order_id)
@@ -751,7 +1084,9 @@ class greeksoft:
 
             for row in rows:
                 try:
-                    if not self.is_retryable_greek_orderbook_row(row):
+                    retryable_status = self.is_retryable_greek_orderbook_row(row)
+                    terminal_failure = self.is_terminal_failed_greek_orderbook_row(row)
+                    if not retryable_status and not terminal_failure:
                         continue
 
                     gorderid = str(self.get_orderbook_row_value(row, "gorderid", "")).strip()
@@ -768,10 +1103,20 @@ class greeksoft:
                         if gorderid in processed_gorderids:
                             continue
 
+                        if terminal_failure:
+                            processed_gorderids.add(gorderid)
+                            self.greek_retry_state_dirty = True
+                            order_meta = self.get_greek_order_meta(root_order_id)
+                            released = self.adjust_greek_net_for_failed_task(order_meta, self.get_orderbook_row_value(row, "pending_qty", 0), "orderbook_exchange_rejected", "GREEK_NET_RELEASE")
+                            printt(f"GREEK_ORDERBOOK_TERMINAL_FAILURE | status=EXCHANGE_REJECTED | root_id={root_order_id} | gorderid={gorderid} | pending_qty={self.get_orderbook_row_value(row, 'pending_qty', 0)} | released={released}")
+                            continue
+
                         retry_count = int(root_state.get("retry_count", 0))
                         if retry_count >= self.max_greek_orderbook_retries:
                             processed_gorderids.add(gorderid)
                             self.greek_retry_state_dirty = True
+                            order_meta = self.get_greek_order_meta(root_order_id)
+                            self.adjust_greek_net_for_failed_task(order_meta, self.get_orderbook_row_value(row, "pending_qty", 0), "orderbook_retry_exhausted", "GREEK_NET_RELEASE")
                             printt(f"GREEK_ORDERBOOK_RETRY_SKIP | reason=max_retries | root_id={root_order_id} | gorderid={gorderid}")
                             continue
 
@@ -890,7 +1235,7 @@ class greeksoft:
             return None
 
 
-    def placeOrderBSE(self,gtoken,side,name,lot,qua,dt):
+    def placeOrderBSE(self,gtoken,side,name,lot,qua,dt,source_order_id=""):
         try:
             global multiplier
 
@@ -913,7 +1258,7 @@ class greeksoft:
 
             quas = getFreezeQua(freez, dt.LotSize, int(qua * multiplier))
             for split_qty in quas:
-                task = self.create_original_greek_order_task("BSE", gtoken, si, name, split_qty, dt)
+                task = self.create_original_greek_order_task("BSE", gtoken, si, name, split_qty, dt, source_order_id)
                 if task:
                     self.enqueue_greek_order_task(task)
             return []
@@ -922,7 +1267,7 @@ class greeksoft:
             return []
 
 
-    def placeOrder(self,gtoken,side,name,lot,qua,dt):
+    def placeOrder(self,gtoken,side,name,lot,qua,dt,source_order_id=""):
         try:
             global multiplier
 
@@ -944,7 +1289,7 @@ class greeksoft:
 
             quas = getFreezeQua(freez, dt.LotSize, int(qua * multiplier))
             for split_qty in quas:
-                task = self.create_original_greek_order_task("NSE", gtoken, side, name, split_qty, dt)
+                task = self.create_original_greek_order_task("NSE", gtoken, side, name, split_qty, dt, source_order_id)
                 if task:
                     self.enqueue_greek_order_task(task)
             return []
