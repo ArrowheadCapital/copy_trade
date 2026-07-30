@@ -13,3 +13,5 @@ credentials_greek.py
 state.json
 stratx_net_state.json
 stratx_recon_state.json
+greek_state.json
+greek_state.json.tmp

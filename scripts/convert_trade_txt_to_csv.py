@@ -1,15 +1,12 @@
+import argparse
 import csv
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
-# Put your NSE/BSE trade text file path here.
-INPUT_TXT_PATH = r"\\100.125.204.120\c\AutoOnlineBackup\BSE\FO\0722AUTOTRD.txt"
-# INPUT_TXT_PATH = r"\\100.125.204.120\c\Users\admin\Documents\AutoOnlineBackup\BSE\FO\0722AUTOTRD.txt"
-
-# Leave blank to create CSV next to the input file with "_grouped.csv" suffix.
-OUTPUT_CSV_PATH = "0722AUTOTRD_grouped.csv"
-
+BASE_DIR = Path(__file__).resolve().parent.parent
+TODAY = datetime.now()
 
 OUTPUT_FIELDS = [
     "Exchange",
@@ -22,6 +19,32 @@ OUTPUT_FIELDS = [
     "TradeDateTime",
     "StrategyName",
 ]
+
+
+def exchange_for_date(run_date):
+    if run_date.weekday() in (0, 1, 4):
+        return "NSE"
+    if run_date.weekday() in (2, 3):
+        return "BSE"
+    raise ValueError("Trade conversion is only supported from Monday to Friday.")
+
+
+def build_paths(run_date, copied=False):
+    short_date = run_date.strftime("%m%d")
+    exchange = exchange_for_date(run_date)
+    if copied:
+        input_path = (
+            rf"\\100.125.204.120\c\Users\admin\Documents"
+            rf"\AutoOnlineBackup\{exchange}\FO\{short_date}AUTOTRD.txt"
+        )
+        output_path = BASE_DIR / f"{short_date}AUTOTRD_grouped_copied.csv"
+    else:
+        input_path = (
+            rf"\\100.125.204.120\c"
+            rf"\AutoOnlineBackup\{exchange}\FO\{short_date}AUTOTRD.txt"
+        )
+        output_path = BASE_DIR / f"{short_date}AUTOTRD_grouped.csv"
+    return input_path, output_path
 
 
 def clean(value):
@@ -149,6 +172,30 @@ def convert_file(input_file, output_file=""):
     return output_path
 
 
-if __name__ == "__main__":
-    created_file = convert_file(INPUT_TXT_PATH, OUTPUT_CSV_PATH)
+def run_for_date(run_date, copied=False):
+    input_path, output_path = build_paths(run_date, copied)
+    created_file = convert_file(input_path, output_path)
     print(f"Created CSV: {created_file}")
+    return created_file
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Group a daily GreekSoft trade file.")
+    parser.add_argument(
+        "--date",
+        type=lambda value: datetime.strptime(value, "%Y%m%d"),
+        default=TODAY,
+        metavar="YYYYMMDD",
+        help="Trade date; defaults to today.",
+    )
+    parser.add_argument(
+        "--copied",
+        action="store_true",
+        help="Process the copied GreekSoft trade file.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    run_for_date(args.date, args.copied)

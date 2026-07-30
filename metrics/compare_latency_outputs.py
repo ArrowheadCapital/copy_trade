@@ -1,3 +1,4 @@
+import argparse
 import csv
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -5,22 +6,32 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+TODAY = datetime.now()
 
-# Base input signal grouped from original NSE/BSE trade text.
-BASE_GROUPED_CSV = "0722AUTOTRD_grouped.csv"
 
-# GreekSoft copy-trade grouped output.
-GREEKSOFT_GROUPED_CSV = "0722AUTOTRD_grouped_copied.csv"
+def daily_filenames(run_date):
+    short_date = run_date.strftime("%m%d")
+    full_date = run_date.strftime("%Y%m%d")
+    return (
+        f"{short_date}AUTOTRD_grouped.csv",
+        f"{short_date}AUTOTRD_grouped_copied.csv",
+        f"{full_date}_latency_impulse.csv",
+        f"{full_date}_latency_volatility.csv",
+    )
 
-# StratX latency files.
-STRATX_IMPULSE_CSV = "20260722_latency_impulse.csv"
-STRATX_VOLATILITY_CSV = "20260722_latency_volatility.csv"
+
+(
+    BASE_GROUPED_CSV,
+    GREEKSOFT_GROUPED_CSV,
+    STRATX_IMPULSE_CSV,
+    STRATX_VOLATILITY_CSV,
+) = daily_filenames(TODAY)
 STRATX_CLIENT_ID = "Y05601"
 
 OUTPUT_CSV = "latency_comparison_Y05601.csv"
 
 # Keep matches close enough that unrelated trades are not paired by accident.
-MAX_MATCH_SECONDS = 300
+MAX_MATCH_SECONDS = 20
 
 INPUT_DT_FMT = "%d %b %Y %H:%M:%S"
 INPUT_SLASH_DT_FMT = "%d/%m/%Y %H:%M:%S"
@@ -134,15 +145,23 @@ def nearest_unused(candidates, base_dt, used_indexes, max_abs_seconds):
     return candidates[best_index]
 
 
-def prepare_rows():
-    base_rows = read_csv(BASE_GROUPED_CSV)
-    greek_rows = read_csv(GREEKSOFT_GROUPED_CSV)
+def prepare_rows(
+    base_grouped_csv,
+    greeksoft_grouped_csv,
+    stratx_impulse_csv,
+    stratx_volatility_csv,
+    include_greeksoft=True,
+):
+    base_rows = read_csv(base_grouped_csv)
+    greek_rows = (
+        read_csv(greeksoft_grouped_csv) if include_greeksoft else []
+    )
     impulse_rows = [
-        row for row in read_csv(STRATX_IMPULSE_CSV)
+        row for row in read_csv(stratx_impulse_csv)
         if row.get("client_id") == STRATX_CLIENT_ID
     ]
     volatility_rows = [
-        row for row in read_csv(STRATX_VOLATILITY_CSV)
+        row for row in read_csv(stratx_volatility_csv)
         if row.get("client_id") == STRATX_CLIENT_ID
     ]
 
@@ -171,8 +190,20 @@ def prepare_rows():
     return base_rows, greek_by_symbol_side, impulse_rows, volatility_rows
 
 
-def build_comparison_rows():
-    base_rows, greek_by_key, impulse_rows, volatility_rows = prepare_rows()
+def build_comparison_rows(
+    base_grouped_csv=BASE_GROUPED_CSV,
+    greeksoft_grouped_csv=GREEKSOFT_GROUPED_CSV,
+    stratx_impulse_csv=STRATX_IMPULSE_CSV,
+    stratx_volatility_csv=STRATX_VOLATILITY_CSV,
+    include_greeksoft=True,
+):
+    base_rows, greek_by_key, impulse_rows, volatility_rows = prepare_rows(
+        base_grouped_csv,
+        greeksoft_grouped_csv,
+        stratx_impulse_csv,
+        stratx_volatility_csv,
+        include_greeksoft,
+    )
     used_greek_by_key = {key: set() for key in greek_by_key}
     used_impulse = set()
     used_volatility = set()
@@ -185,11 +216,15 @@ def build_comparison_rows():
         side = base["BuySell"]
         key = (base["Symbol"], side)
 
-        greek = nearest_unused(
-            greek_by_key.get(key, []),
-            base_dt,
-            used_greek_by_key.setdefault(key, set()),
-            MAX_MATCH_SECONDS,
+        greek = (
+            nearest_unused(
+                greek_by_key.get(key, []),
+                base_dt,
+                used_greek_by_key.setdefault(key, set()),
+                MAX_MATCH_SECONDS,
+            )
+            if include_greeksoft
+            else None
         )
         impulse = nearest_unused(
             impulse_rows, base_dt, used_impulse, MAX_MATCH_SECONDS
@@ -282,17 +317,45 @@ def build_comparison_rows():
     return output_rows
 
 
-def write_comparison():
-    output_rows = build_comparison_rows()
+def write_comparison(run_date=TODAY, include_greeksoft=True):
+    filenames = daily_filenames(run_date)
+    output_rows = build_comparison_rows(*filenames, include_greeksoft)
     output_path = BASE_DIR / OUTPUT_CSV
+    fieldnames = (
+        FIELDNAMES
+        if include_greeksoft
+        else [field for field in FIELDNAMES if not field.startswith("Greek")]
+    )
     with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+            extrasaction="ignore",
+        )
         writer.writeheader()
         writer.writerows(output_rows)
     return output_path, output_rows
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Build the daily latency comparison.")
+    parser.add_argument(
+        "--date",
+        type=lambda value: datetime.strptime(value, "%Y%m%d"),
+        default=TODAY,
+        metavar="YYYYMMDD",
+        help="Trade date; defaults to today.",
+    )
+    parser.add_argument(
+        "--no-greeksoft",
+        action="store_true",
+        help="Exclude the copied GreekSoft input and all Greek columns.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    created_file, rows = write_comparison()
+    args = parse_args()
+    created_file, rows = write_comparison(args.date, not args.no_greeksoft)
     print(f"Created comparison CSV: {created_file}")
     print(f"Rows: {len(rows)}")

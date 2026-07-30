@@ -4,7 +4,7 @@ Copy Trade is a Python trade-copying engine. It watches live NSE and BSE trade f
 
 The project currently supports two broker paths:
 
-* `GREEK`: Greeksoft API order placement.
+* `GREEK`: GreekSoft API order placement, Redis pricing, orderbook polling, and failed-order retry.
 * `STRATX`: StratX API order placement, pricing, circuit clamping, orderbook polling, client-aware failed-order retry, and runtime positive/negative net-limit control.
 
 This README explains the complete project flow and the important functions in the codebase.
@@ -16,7 +16,7 @@ This README explains the complete project flow and the important functions in th
 | `src/zFinalMulti.py` | Main runtime. Reads CSV files, starts workers, queues trades, polls orderbooks, and dispatches broker orders. |
 | `src/zzEXE.py` | Tkinter GUI wrapper. It starts `src/zFinalMulti.py` and owns the final shutdown hooks. |
 | `src/helperGS.py` | Compatibility facade that keeps `HG.greeksoft()` and `HG.StratX()` available after broker separation. |
-| `src/greeksoft/broker.py` | Complete GreekSoft authentication, instrument lookup, order placement, rate limiting, and orderbook implementation. |
+| `src/greeksoft/broker.py` | Complete GreekSoft authentication, precomputed instrument lookup, pooled order placement, pricing, HTTP/orderbook retry, retry-state persistence, rate limiting, and orderbook implementation. |
 | `src/stratx/broker.py` | Complete existing StratX implementation, including pricing, retry, net state, instrument lookup, and order placement. |
 | `src/stratx/stratx_reconciliation.py` | StratX desired-versus-traded comparison, correction lifecycle, and reconciliation-state persistence. |
 | `src/utils/broker_helpers.py` | Small set of genuinely shared broker helpers for logging compatibility and price/tick adjustment. |
@@ -40,6 +40,7 @@ trades.csv
 state.json
 stratx_net_state.json
 stratx_recon_state.json
+greek_state.json
 ```
 
 The folders use Python 3 namespace-package imports, so empty `__init__.py` files are not required. Launch commands must be run from the repository root using the documented `python -m ...` form.
@@ -74,8 +75,8 @@ NSE/BSE trade CSV changes
   -> NSE/BSE worker validates row
   -> selected broker places order
   -> orderbook thread polls broker orderbook
+  -> selected broker retry processor handles retryable failed rows
   -> trades.csv is refreshed
-  -> StratX retry processor handles retryable failed rows
 ```
 
 ## Configuration
@@ -464,6 +465,12 @@ For StratX, before writing `trades.csv`, it also calls:
 
 ```python
 brokerObj.retry_failed_orderbook_orders(data)
+```
+
+For GreekSoft, it calls:
+
+```python
+brokerObj.retry_failed_greeksoft_orders(data)
 ```
 
 Then it writes the latest orderbook data to:
@@ -874,6 +881,12 @@ When `greeksoft()` is created:
 1. It calls the Greeksoft auth API to get a session token.
 2. It downloads the Greeksoft instrument master.
 3. It logs in to get `gcid`.
+4. It filters the instrument master to NIFTY and SENSEX options, then precomputes the NIFTY/NSE contract-key map and SENSEX/BSE exchange-token map.
+5. It loads the current day's retry state from `greek_state.json`.
+6. It starts the dirty-state saver.
+7. It creates and warms five reusable GreekSoft order-worker sessions.
+
+Authentication, login, instrument download, warmup, order submission, and orderbook requests use bounded request timeouts. Initialization fails after four unsuccessful authentication/startup attempts instead of continuing with an unusable broker object.
 
 ### `login()`
 
@@ -915,7 +928,11 @@ for local inspection.
 
 ### `getData(t)`
 
-Finds the matching NSE instrument row from `self.df`.
+Finds the matching NSE instrument row from a precomputed map keyed by:
+
+```text
+Symbol + YYYYMMDD expiry + StrikePrice + OptionType
+```
 
 It matches:
 
@@ -926,9 +943,11 @@ It matches:
 
 The returned row contains the Greek token, lot size, symbol, and other contract data needed by `placeOrder()`.
 
+The NSE source expiry such as `23JUL2026` and GreekSoft master expiry such as `23-Jul-26` are normalized to `YYYYMMDD`. Existing DataFrame filtering remains as a fallback if a precomputed key is unavailable.
+
 ### `getDataBSE(t)`
 
-Finds the matching BSE instrument by exchange token.
+Finds the matching BSE instrument from the precomputed exchange-token map.
 
 The BSE worker passes:
 
@@ -957,11 +976,13 @@ Flow:
 2. Split total quantity using `getFreezeQua()`.
 3. Convert each quantity chunk to lots.
 4. Build the Redis cache symbol from the resolved GreekSoft instrument row using `Symbol + DDMMMYY expiry + StrikePrice + OptionType`.
-5. For each child order, wait for the GreekSoft rate-limit slot.
-6. After the wait, read fresh Redis LTP/average. Values may be reused only within the 200 millisecond cache window.
-7. Apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
-8. Send a limit order (`order_type = "1"`) with the calculated price. If pricing fails, send the existing market fallback (`order_type = "2"`, `price = "0"`).
-9. Return the list of GreekSoft order IDs.
+5. Give every child order its own root id and persist its original metadata in memory.
+6. Enqueue each child into the shared five-worker GreekSoft order pool.
+7. In the worker, wait for the GreekSoft rate-limit slot.
+8. After the wait, read fresh Redis LTP/average. Values may be reused only within the 200 millisecond cache window.
+9. Apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
+10. Send a limit order (`order_type = "1"`) with the calculated price. If pricing fails, send the existing market fallback (`order_type = "2"`, `price = "0"`).
+11. Validate the response and map the returned `gorderid` to the child's root id.
 
 The payload uses:
 
@@ -989,6 +1010,20 @@ For both Greeksoft NSE and BSE orders, `iprocli` and `AccountNumber` come from `
 
 `AccountNumber` is required for dealer-through-retailer orders. Otherwise it can be kept empty.
 
+### GreekSoft HTTP Attempts
+
+GreekSoft order workers use:
+
+```python
+greek_http_max_attempts = 2
+greek_http_retry_sleep = 0.3
+greek_request_timeout = 15
+```
+
+This permits one original HTTP request and at most one safe second attempt. A second attempt is allowed for a received non-success HTTP response or an immediate connection reset matching the narrow safe-reset condition. The worker waits for another rate-limit slot and recalculates price before the second request.
+
+Read timeouts, delayed uncertain connection failures, and successful HTTP responses missing a `gorderid` are not automatically repeated because the broker may already have received the order.
+
 ### `getOrderStatus(orderId)`
 
 Reads `trades.csv` and finds a matching Greeksoft order id:
@@ -1006,6 +1041,48 @@ getOrderBookDetailWithLegV2
 ```
 
 The orderbook thread writes the returned data into `trades.csv`.
+
+### GreekSoft Orderbook Retry
+
+GreekSoft orderbook retry is separate from HTTP attempts. Retry state is stored in:
+
+```text
+greek_state.json
+```
+
+The state is date-scoped and contains:
+
+```text
+gorderid -> root_order_id
+original order metadata by root
+retry count by root
+processed failed gorderids by root
+```
+
+The live order path updates state in memory and marks it dirty. A background saver writes through `greek_state.json.tmp` and atomically replaces `greek_state.json`.
+
+The current conservative retry condition is:
+
+```text
+order_status == CANCELLED
+and pending_qty > 0
+```
+
+`is_retryable_greek_orderbook_row()` owns this rule so selected exchange-rejection error codes can be added later without changing the rest of the retry lifecycle.
+
+For an eligible row, `retry_failed_greeksoft_orders()`:
+
+1. Reads and normalizes `gorderid`.
+2. Ignores orders not registered by this copy-trade process.
+3. Resolves the original root.
+4. Skips already processed failed order ids.
+5. Enforces `max_greek_orderbook_retries` per root, currently `1`.
+6. Loads the saved contract metadata and uses `pending_qty` after validating it against original quantity and lot size.
+7. Enqueues a retry task through the same five-worker pool.
+8. Recalculates price after the rate-limit wait.
+9. Maps the newly returned retry `gorderid` to the same root.
+
+GreekSoft position reconciliation is not implemented by this retry feature.
 
 ## StratX Broker Flow
 
@@ -1923,9 +2000,10 @@ Output is redirected into a scrollable text area.
 
 On close:
 
-1. It tries to call `brokerObj.save_stratx_net_state_now()` and `brokerObj.save_retry_state_now()` if the broker object exists and supports them.
-2. It destroys the Tkinter root.
-3. It calls `os._exit(0)` to terminate background threads.
+1. For StratX, it saves net, retry, and reconciliation state.
+2. For GreekSoft, it saves `greek_state.json` if the broker object is active.
+3. It destroys the Tkinter root.
+4. It calls `os._exit(0)` to terminate background threads.
 
 ## Setup
 
