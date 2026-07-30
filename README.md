@@ -74,6 +74,7 @@ The most important settings are:
 | `pathNSE`/`pathBSE`                                                                                                                                                     | Daily source trade-file templates. They must contain`{formatted_date}`.                                                                                                                                                                                                                                                |
 | `multiplier`                                                                                                                                                              | Multiplies copied order quantity. Default is`1`.                                                                                                                                                                                                                                                                       |
 | `copy_source_id`                                                                                                                                                          | Source id allowed for copied rows. NSE and BSE rows with a different source id are skipped before combining.                                                                                                                                                                                                            |
+| `source_strategy_names`                                                                                                                                                   | List of source strategy names allowed for copied NSE and BSE rows.                                                                                                                                                                                                                                                       |
 | `niftyFreeze`,`bnfFreeze`,`sensexFreeze`,`bankex`,`midcpnifty`,`finnifty`                                                                                       | Freeze quantity limits used while placing/splitting orders.                                                                                                                                                                                                                                                              |
 | `optionInstrumentPath`                                                                                                                                                    | StratX instrument CSV path, loaded from`OPTION_INSTRUMENT_CSV`in`.env`.                                                                                                                                                                                                                                              |
 | `strategy_name`                                                                                                                                                           | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value.                                                                                                                                                                                                                                  |
@@ -96,16 +97,17 @@ datetime.datetime.today().strftime("%m%d")
 
 For example, on June 2 the file name date part is `0602`.
 
-NSE files are comma-separated. BSE files are pipe-separated.
+NSE files are comma-separated. BSE files are pipe-separated. The first row must match the expected NSE/BSE header in `zFinalMulti.py`. Header validation happens once per exchange per run; a missing or mismatched header disables copying from that exchange for the run.
 
 ### Copy Source Filter
 
 Rows are filtered before grouping/combining.
 
-The allowed source id is configured in `credentials.py`:
+The allowed source id and source strategy names are configured in `credentials.py`:
 
 ```python
 copy_source_id = "TS739"
+source_strategy_names = ["GREEKSOFT"]
 ```
 
 The allowed row delay is configured in `.env`:
@@ -114,7 +116,7 @@ The allowed row delay is configured in `.env`:
 COPY_ALLOWED_DELAY_SECONDS = 120
 ```
 
-A row is copied only when its source id matches `copy_source_id` and the difference between current system time and row time is less than or equal to `COPY_ALLOWED_DELAY_SECONDS`.
+A row is copied only when its source id matches `copy_source_id`, its strategy matches one value in `source_strategy_names`, and the difference between current system time and row time is less than or equal to `COPY_ALLOWED_DELAY_SECONDS`.
 
 ### Broker Selection
 
@@ -534,7 +536,7 @@ qty_col = 7
 exchange_order_id_col = 16
 ```
 
-Before grouping, the code skips rows whose source id does not match `copy_source_id` or whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`.
+Before grouping, the code skips rows whose source id does not match `copy_source_id`, whose strategy is not in `source_strategy_names`, or whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`.
 
 The code then groups allowed new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
 

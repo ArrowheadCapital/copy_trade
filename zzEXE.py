@@ -55,6 +55,12 @@ def get_start_config_errors():
     if not str(getattr(cre, "copy_source_id", "") or "").strip():
         errors.append("copy_source_id is missing or empty")
 
+    source_strategy_names = getattr(cre, "source_strategy_names", [])
+    if not isinstance(source_strategy_names, (list, tuple, set)) or not any(
+        str(name).strip() for name in source_strategy_names
+    ):
+        errors.append("source_strategy_names must contain at least one strategy")
+
     if cre.broker.upper() == "STRATX":
         if not str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip():
             errors.append("STRATX_NET_CLIENT_ID is missing or empty")
