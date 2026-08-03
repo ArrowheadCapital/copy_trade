@@ -975,6 +975,21 @@ class greeksoft:
                 response_root = response_json.get("response", {})
                 response_data = response_root.get("data", {})
                 gorderid = response_data.get("gorderid")
+                streaming_type = str(response_root.get("streaming_type", "")).strip()
+
+                if streaming_type == "IrisRejection":
+                    rejection_reason = str(response_data.get("reason", "")).strip()
+                    normalized_reason = rejection_reason.casefold()
+                    if "throttle" in normalized_reason and "reached" in normalized_reason:
+                        retry_available = attempt < self.greek_http_max_attempts
+                        action = "retry" if retry_available else "stop"
+                        printt(f"GREEK_ORDER_FAILED | attempt={attempt} | max={self.greek_http_max_attempts} | rejected_gorderid={gorderid} | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | price={payload_price} | order_type={order_type} | http={http_ms:.1f}ms | reason={rejection_reason} | action={action}")
+                        if retry_available:
+                            printt(f"GREEK_HTTP_RETRY | next_attempt={attempt + 1} | max={self.greek_http_max_attempts} | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | reason=throttle_rejection")
+                            time.sleep(self.greek_http_retry_sleep)
+                            continue
+                        raise RuntimeError(f"GreekSoft throttle rejection after {self.greek_http_max_attempts} attempts: gorderid={gorderid}, reason={rejection_reason}")
+
                 if not gorderid:
                     raise RuntimeError(f"GreekSoft response missing gorderid: {response_json}")
 
