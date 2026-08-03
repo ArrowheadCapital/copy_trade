@@ -109,7 +109,7 @@ class greeksoft:
     greek_instrument_names_to_load = {"NIFTY", "SENSEX"}
     greek_order_workers = 5
     greek_request_timeout = 15
-    greek_http_max_attempts = 2
+    greek_http_max_attempts = 3
     greek_http_retry_sleep = 0.3
     greek_retry_state_file = "greek_state.json"
     greek_retry_state_save_interval = 1
