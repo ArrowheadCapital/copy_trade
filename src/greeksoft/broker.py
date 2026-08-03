@@ -1,5 +1,6 @@
 import json
 import requests
+import socket
 import datetime
 import os
 import time
@@ -11,6 +12,7 @@ import credentials as cre
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
+from urllib3.connection import HTTPConnection
 from src.utils.broker_helpers import createLogFile, printt, saveInLogFile
 from src.utils.order_pricing import build_cache_symbol, price_from_avg_ltp_or_fallback
 
@@ -35,6 +37,20 @@ greek_rate_lock = threading.Lock()
 greek_order_timestamps = deque()
 MAX_GREEK_ORDERS_PER_WINDOW = 9
 GREEK_RATE_WINDOW_SECONDS = 1.2
+GREEK_KEEPALIVE_IDLE_SECONDS = 30
+GREEK_KEEPALIVE_INTERVAL_SECONDS = 10
+GREEK_KEEPALIVE_PROBE_COUNT = 3
+
+
+class GreekKeepAliveAdapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["socket_options"] = HTTPConnection.default_socket_options + [
+            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+            (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, GREEK_KEEPALIVE_IDLE_SECONDS),
+            (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, GREEK_KEEPALIVE_INTERVAL_SECONDS),
+            (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, GREEK_KEEPALIVE_PROBE_COUNT),
+        ]
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
 
 
 def wait_for_greek_order_slot():
@@ -180,7 +196,7 @@ class greeksoft:
             session = getattr(self.greek_thread_local, "session", None)
             if session is None:
                 session = requests.Session()
-                adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, pool_block=False)
+                adapter = GreekKeepAliveAdapter(pool_connections=10, pool_maxsize=10, pool_block=False)
                 session.mount("http://", adapter)
                 session.mount("https://", adapter)
                 self.greek_thread_local.session = session
@@ -885,7 +901,7 @@ class greeksoft:
                         "gtoken": str(task["gtoken"]),
                         "side": str(task["side"]),
                         "gcid": self.gcid,
-                        "validity": "0",
+                        "validity": "1",
                         "price": payload_price,
                         "exchange": str(task["exchange"]),
                         "disclosed_qty": "0",

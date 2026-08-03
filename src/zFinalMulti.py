@@ -197,7 +197,7 @@ def is_copy_row_allowed(row_id, strategy_name, row_dt, source):
 
 def is_market_open():
     now = datetime.datetime.now()
-    return datetime.time(9, 15) <= now.time() <= datetime.time(15, 30)
+    return datetime.time(9, 15) <= now.time() <= datetime.time(15, 40)
 
 
 def is_symbol_allowed(symbol):
