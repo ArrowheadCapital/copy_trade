@@ -448,7 +448,7 @@ Performs basic validation before an order is sent:
 Workers only place orders between:
 
 ```text
-09:15 to 15:30
+09:15 to 15:40
 ```
 
 Outside market hours, workers sleep and do not consume queue rows.
@@ -903,6 +903,18 @@ Before NSE/BSE order workers start, `src/zFinalMulti.py` also loads `greek_net_s
 
 Authentication, login, instrument download, warmup, order submission, and orderbook requests use bounded request timeouts. Initialization fails after four unsuccessful authentication/startup attempts instead of continuing with an unusable broker object.
 
+### GreekSoft TCP Keepalive
+
+Each worker keeps its existing thread-local `requests.Session`, connection-pool sizes, and session warmup. `GreekKeepAliveAdapter` preserves urllib3's default socket options and additionally enables Windows TCP keepalive on newly created pooled connections:
+
+```python
+GREEK_KEEPALIVE_IDLE_SECONDS = 30
+GREEK_KEEPALIVE_INTERVAL_SECONDS = 10
+GREEK_KEEPALIVE_PROBE_COUNT = 3
+```
+
+After 30 seconds without TCP traffic, Windows checks the idle connection and repeats the check every 10 seconds. After three unanswered probes, the socket is marked dead so urllib3 does not continue treating it as a reusable live connection. Probes contain no HTTP request or order data, do not consume the GreekSoft order-rate limit, and do not occupy order workers. This changes only pooled-connection health checking; workers, sessions, pricing, payloads, HTTP attempts, orderbook retry and net protection remain unchanged. The application must restart for newly created connections to receive these socket settings.
+
 ### `login()`
 
 Calls:
@@ -1004,6 +1016,7 @@ The payload uses:
 
 * exchange: `NSE`,
 * order type: `1` when Redis pricing succeeds, otherwise market fallback `2`,
+* validity: `1`, so GreekSoft original and retry orders use IOC validity,
 * product: `0`,
 * strategyName: `AlgoSelf`,
 * `tag` and `userTag`: copied source exchange order id as a string (`t[23]` for NSE and `t[16]` for BSE),
@@ -1038,6 +1051,8 @@ greek_request_timeout = 15
 ```
 
 This permits one original HTTP request and at most one safe second attempt. A second attempt is allowed for a received non-success HTTP response or an immediate connection reset matching the narrow safe-reset condition. The worker waits for another rate-limit slot and recalculates price before the second request.
+
+A successful HTTP response with `streaming_type = "IrisRejection"` and a reason containing both `throttle` and `reached` (case-insensitive) is treated as a rejected order rather than a successful submission. The rejected `gorderid`, complete option symbol and reason are logged, and the existing safe second HTTP attempt is used without registering the rejected order id.
 
 Read timeouts, delayed uncertain connection failures, and successful HTTP responses missing a `gorderid` are not automatically repeated because the broker may already have received the order.
 
@@ -1792,7 +1807,7 @@ If the full order fits within the configured positive/negative range, the full o
 
 Reversal orders are allowed when the final net remains within the configured positive/negative range. For example, with `NIFTY_CE_POS_NET = 65` and `NIFTY_CE_NEG_NET = 130`, current net `+65` and SELL `195` gives final net `-130`, so the full SELL quantity is allowed.
 
-On startup, StratX fetches `TRADED` rows for `STRATX_NET_CLIENT_ID`, rebuilds `NIFTY_CE`, `NIFTY_PE`, `SENSEX_CE`, and `SENSEX_PE`, and replaces runtime net with the broker-calculated value. The GUI `Sync Net` button runs the same sync under `net_lock`.
+On startup, StratX fetches `TRADED` rows for `STRATX_NET_CLIENT_ID`, rebuilds `NIFTY_CE`, `NIFTY_PE`, `SENSEX_CE`, and `SENSEX_PE`, and replaces runtime net with the broker-calculated value. A valid no-data response is logged as `STRATX_NET_SYNC_EMPTY` and produces zero for all four buckets instead of a fetch failure. The GUI `Sync Net` button runs the same sync under `net_lock`.
 
 Runtime net is saved in `stratx_net_state.json` by a background saver, so order placement only updates in-memory net and marks state dirty. This keeps the limit check fast while still allowing an intraday restart to continue from the last saved net if broker sync fails. If StratX HTTP placement fails before a reference id is received, the reservation is rolled back. If orderbook later shows a terminal failed row for `STRATX_NET_CLIENT_ID`, the reservation is released once. Retry orders do not add quantity again; they keep the original reservation until the retry succeeds or reaches final failure.
 
@@ -2064,7 +2079,7 @@ The Start Algo button runs:
 exec_script('src/zFinalMulti.py', on_algo_complete)
 ```
 
-Output is redirected into a scrollable text area.
+GUI output is routed through an unbounded thread-safe queue into separate `Logs` and `Errors (N)` tabs. Normal entries appear only in `Logs`; stderr, warnings, failed/rejected/error/failure prefixes, failed HTTP responses, connection-reset and orderbook retries, net-limit skips and quantity adjustments, ITM skips, pricing fallbacks, rate-limit hits, skipped paused/stale trades, queue overload, net rollback/release, Redis source switches, malformed-row errors and other audited attention prefixes appear only in `Errors (N)`. The count increases once per nonblank error entry. Prefix classification runs on the Tkinter thread in batches, while the existing daily log file keeps the complete mixed chronological sequence.
 
 The Sync Net button is available for both brokers after the algo starts. It runs the selected broker's sync method in a daemon worker, disables the button during the sync, and restores it afterward. StratX continues using its existing TRADED-report sync; GreekSoft uses its GreekSoft orderbook `traded_qty` sync.
 
@@ -2123,7 +2138,7 @@ and confirm the file exists before starting.
 Check market time. Workers sleep outside:
 
 ```text
-09:15 to 15:30
+09:15 to 15:40
 ```
 
 ### StratX net limit order skipped

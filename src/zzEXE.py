@@ -6,6 +6,7 @@ import sys
 import io
 import os
 import importlib
+import queue
 from pathlib import Path
 
 repository_root = str(Path(__file__).resolve().parent.parent)
@@ -31,19 +32,88 @@ STRATX_NET_LIMIT_NAMES = (
     "SENSEX_PE_NEG_NET",
 )
 
+GUI_LOG_QUEUE = queue.SimpleQueue()
+GUI_LOG_BATCH_SIZE = 500
+GUI_LOG_IDLE_POLL_MS = 10
+ERROR_PREFIX_MARKERS = ("ERROR", "FAILED", "REJECTED", "FAILURE")
+ERROR_EXACT_PREFIXES = {
+    "GREEK_CONNECTION_RESET_RETRY",
+    "GREEK_HTTP_RETRY",
+    "GREEK_HTTP_RETRY_RESPONSE",
+    "GREEK_NET_LIMIT_SKIP",
+    "GREEK_NET_ORDER_QTY_ADJUSTED",
+    "GREEK_NET_PARTIAL_ALLOWED",
+    "GREEK_NET_RELEASE",
+    "GREEK_NET_ROLLBACK",
+    "GREEK_ORDERBOOK_RETRY_SKIP",
+    "GREEK_ORDERBOOK_RETRY_ENQUEUE",
+    "GREEK_PRICE_FALLBACK",
+    "ORDERID SAVING SKIP",
+    "QUEUE LOAD",
+    "RATE LIMIT HIT",
+    "REDIS_ACTIVE_SWITCH",
+    "STRATX_NET_SYNC_SKIPPED",
+    "STRATX_CONNECTION_RESET_RETRY",
+    "STRATX_HTTP_RETRY_REPRICE",
+    "STRATX_HTTP_RETRY_RESPONSE",
+    "STRATX_NET_LIMIT_SKIP",
+    "STRATX_NET_ORDERBOOK_RELEASE_SKIPPED",
+    "STRATX_NET_ORDER_QTY_ADJUSTED",
+    "STRATX_NET_PARTIAL_ALLOWED",
+    "STRATX_NET_RELEASE",
+    "STRATX_NET_RELEASE_SKIPPED",
+    "STRATX_NET_ROLLBACK",
+    "STRATX_ORDERBOOK_RETRY_SUBMIT",
+    "STRATX_RECON_CORRECTION_SKIPPED",
+    "STRATX_RECON_SKIPPED",
+    "STRATX_RECON_STATE_COOLDOWN_SKIPPED",
+    "STRATX_RECON_STATE_PENDING_SKIPPED",
+}
+
+
+def get_log_prefix(line):
+    message = str(line).strip()
+    if message.startswith("[") and "] : " in message:
+        message = message.split("] : ", 1)[1].strip()
+    return message.split(" | ", 1)[0].strip()
+
+
+def is_error_log_line(line, is_stderr=False):
+    if is_stderr:
+        return True
+
+    prefix = get_log_prefix(line).upper()
+    if not prefix:
+        return False
+    if prefix.startswith(("[WARN]", "[ERROR")):
+        return True
+    if any(marker in prefix for marker in ERROR_PREFIX_MARKERS):
+        return True
+    if prefix in ERROR_EXACT_PREFIXES:
+        return True
+    if prefix.endswith(("_ROW_SKIPPED", "_OVER_LIMIT", "_MISSING", "_MISMATCH")):
+        return True
+    if prefix.startswith(("INSTRUMENT MASTER UPDATES", "INVALID TRADE DATA", "INVALID BSE TRADE DATA", "INSTRUMENT FILE NOT FOUND", "NO ORDER UPDATE", "PRICE NOT PRESENT", "SKIPPING CE BEYOND", "SKIPPING ITM CHECK", "SKIPPING PE BEYOND", "SYMBOL NOT WHITELISTED", "THE FOLDER", "THIS IS FINAL STATUS OF ORDER")):
+        return True
+    if "HEADER MISMATCH" in prefix or prefix.endswith("COPY FILTER CONFIGURATION MISSING"):
+        return True
+    if prefix.endswith(" PAUSED: SKIPPED") or " PAUSED: SKIPPED " in prefix or prefix.endswith(" SKIP DELAY"):
+        return True
+    return "ORDER STATUS RETRY" in prefix
+
+
 class RedirectText(io.StringIO):
-    def __init__(self, text_widget):
+    def __init__(self, stream_name):
         super().__init__()
-        self.text_widget = text_widget
+        self.stream_name = stream_name
 
     def write(self, string):
-        self.text_widget.configure(state='normal')
-        self.text_widget.insert(tk.END, string)
-        self.text_widget.see(tk.END)
-        self.text_widget.configure(state='disabled')
+        if string:
+            GUI_LOG_QUEUE.put((self.stream_name, str(string)))
+        return len(string)
 
     def flush(self):
-        pass
+        GUI_LOG_QUEUE.put((self.stream_name, None))
 
 def exec_script(script_name, on_complete):
     try:
@@ -299,8 +369,21 @@ logs_card.pack(expand=True, fill='both', padx=20, pady=(0, 10))
 logs_card.columnconfigure(0, weight=1)
 logs_card.rowconfigure(0, weight=1)
 
+logs_notebook = ttk.Notebook(logs_card)
+logs_notebook.grid(row=0, column=0, sticky='nsew', padx=0, pady=0)
+
+normal_logs_tab = ttk.Frame(logs_notebook)
+error_logs_tab = ttk.Frame(logs_notebook)
+logs_notebook.add(normal_logs_tab, text="Logs")
+logs_notebook.add(error_logs_tab, text="Errors (0)")
+
+normal_logs_tab.columnconfigure(0, weight=1)
+normal_logs_tab.rowconfigure(0, weight=1)
+error_logs_tab.columnconfigure(0, weight=1)
+error_logs_tab.rowconfigure(0, weight=1)
+
 text_area = ScrolledText(
-    logs_card,
+    normal_logs_tab,
     wrap=tk.WORD,
     font=("Consolas", 12),
     background="#f9fafb",
@@ -310,6 +393,74 @@ text_area = ScrolledText(
 )
 text_area.grid(row=0, column=0, sticky='nsew', padx=0, pady=0)
 text_area.configure(height=20)
+
+error_text_area = ScrolledText(
+    error_logs_tab,
+    wrap=tk.WORD,
+    font=("Consolas", 12),
+    background="#fff7f7",
+    foreground="#991b1b",
+    borderwidth=0,
+    relief="flat"
+)
+error_text_area.grid(row=0, column=0, sticky='nsew', padx=0, pady=0)
+error_text_area.configure(height=20)
+
+gui_log_buffers = {"stdout": "", "stderr": ""}
+gui_error_count = 0
+
+
+def append_gui_log_batch(widget, lines):
+    if not lines:
+        return
+    widget.configure(state='normal')
+    widget.insert(tk.END, "".join(lines))
+    widget.see(tk.END)
+    widget.configure(state='disabled')
+
+
+def process_gui_log_queue():
+    global gui_error_count
+    normal_lines = []
+    error_lines = []
+    processed = 0
+
+    while processed < GUI_LOG_BATCH_SIZE:
+        try:
+            stream_name, chunk = GUI_LOG_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+
+        processed += 1
+        buffered = gui_log_buffers.get(stream_name, "")
+        if chunk is None:
+            complete_lines = [buffered] if buffered else []
+            gui_log_buffers[stream_name] = ""
+        else:
+            combined = buffered + chunk
+            complete_lines = combined.splitlines(keepends=True)
+            if complete_lines and not complete_lines[-1].endswith(("\n", "\r")):
+                gui_log_buffers[stream_name] = complete_lines.pop()
+            else:
+                gui_log_buffers[stream_name] = ""
+
+        for line in complete_lines:
+            if is_error_log_line(line, is_stderr=stream_name == "stderr"):
+                error_lines.append(line)
+                if line.strip():
+                    gui_error_count += 1
+            else:
+                normal_lines.append(line)
+
+    append_gui_log_batch(text_area, normal_lines)
+    append_gui_log_batch(error_text_area, error_lines)
+    if error_lines:
+        logs_notebook.tab(error_logs_tab, text=f"Errors ({gui_error_count})")
+
+    if processed == GUI_LOG_BATCH_SIZE:
+        root.after_idle(process_gui_log_queue)
+    else:
+        root.after(GUI_LOG_IDLE_POLL_MS, process_gui_log_queue)
 
 # --- Action Button ---
 button_frame = ttk.Frame(logs_card)
@@ -342,8 +493,9 @@ if cre.broker.upper() in ("STRATX", "GREEK"):
     sync_button.grid(row=0, column=action_column + 2, padx=4, pady=4)
 
 # Redirect stdout/stderr
-sys.stdout = RedirectText(text_area)
-sys.stderr = RedirectText(text_area)
+sys.stdout = RedirectText("stdout")
+sys.stderr = RedirectText("stderr")
+root.after(GUI_LOG_IDLE_POLL_MS, process_gui_log_queue)
 
 root.protocol("WM_DELETE_WINDOW", on_close)
 root.mainloop()

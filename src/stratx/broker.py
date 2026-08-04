@@ -276,8 +276,12 @@ class StratX:
                     return None
 
                 page_data = page_response.get("data")
+                if page_data is None:
+                    printt("STRATX_NET_SYNC_EMPTY | reason=no_traded_orders")
+                    return all_data
+
                 if not isinstance(page_data, list):
-                    printt("STRATX_NET_SYNC_FETCH_FAILED | reason=missing_data_list")
+                    printt(f"STRATX_NET_SYNC_FETCH_FAILED | reason=invalid_data_type | response={page_response}")
                     return None
 
                 all_data.extend(page_data)
