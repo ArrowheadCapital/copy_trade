@@ -141,7 +141,7 @@ def get_ltp_avg(cache_symbol):
 
                 tick_time = payload.get("Time")
                 ltp = payload.get("LTP")
-                avg = payload.get("avg")
+                reference_price = payload.get("reference_price")
 
                 if tick_time is None or ltp is None:
                     printt(f"REDIS_LTP_FAILED | source={source_name} | key={key} | reason=missing_field")
@@ -159,7 +159,7 @@ def get_ltp_avg(cache_symbol):
 
                 result = {
                     "ltp": float(ltp),
-                    "avg": float(avg) if avg is not None else None,
+                    "reference_price": float(reference_price) if reference_price is not None else None,
                     "time": tick_time,
                     "source": source_name,
                 }

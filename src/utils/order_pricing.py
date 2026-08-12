@@ -5,7 +5,7 @@ from src.utils.broker_helpers import printt, round_to_tick
 from src.utils.fetch_circuit import get_circuit_limits, get_ltp_avg
 
 
-market_order_offset = 8
+today_expiry_token = datetime.date.today().strftime("%d%b%y").upper()
 redis_ltp_avg_cache = {}
 redis_ltp_avg_cache_ttl = 0.2
 
@@ -72,7 +72,7 @@ def get_redis_ltp_avg(cache_symbol):
         if not data:
             return 0, 0
 
-        result = (data["ltp"], data["avg"])
+        result = (data["ltp"], data["reference_price"])
         redis_ltp_avg_cache[cache_key] = (time.perf_counter(), result)
         return result
     except Exception as e:
@@ -83,31 +83,33 @@ def get_redis_ltp_avg(cache_symbol):
 def price_from_avg_ltp_or_fallback(side, tick_size, cache_symbol=None):
     try:
         if cache_symbol:
-            ltp, avg = get_redis_ltp_avg(cache_symbol)
+            ltp, reference_price = get_redis_ltp_avg(cache_symbol)
 
-            if ltp == 0 and avg == 0:
+            if ltp == 0 and reference_price == 0:
                 return 0
 
             if ltp is not None:
-                offset_ltp = ltp * (market_order_offset / 100)
-                if ltp <= 50:
-                    offset_ltp = market_order_offset
+                cache_key = str(cache_symbol).strip().upper()
+                is_bse_expiry = cache_key.startswith(("SENSEX", "BANKEX")) and today_expiry_token in cache_key
 
-                offset_avg = None
-                if avg is not None:
-                    offset_avg = avg * (market_order_offset / 100)
-                    if avg <= 50:
-                        offset_avg = market_order_offset
+                def get_offset(value):
+                    if is_bse_expiry:
+                        return max(value * 0.38, 8)
+                    return max(value * 0.38, 18)
 
-                if avg is None:
+                offset_ltp = get_offset(ltp)
+
+                if reference_price is None:
                     if str(side).upper() == "BUY":
                         raw = ltp + offset_ltp
                     else:
                         raw = max(float(tick_size), ltp - offset_ltp)
                 elif str(side).upper() == "BUY":
-                    raw = (ltp + offset_ltp) if (avg + offset_avg <= ltp) else (avg + offset_avg)
+                    reference_price_calculated = reference_price + get_offset(reference_price)
+                    raw = (ltp + offset_ltp) if (reference_price_calculated <= ltp) else reference_price_calculated
                 else:
-                    raw = (ltp - offset_ltp) if (avg - offset_avg >= ltp) else (avg - offset_avg)
+                    reference_price_calculated = reference_price - get_offset(reference_price)
+                    raw = (ltp - offset_ltp) if (reference_price_calculated >= ltp) else reference_price_calculated
                     raw = max(float(tick_size), raw)
 
                 price = round_to_tick(raw, float(tick_size))
