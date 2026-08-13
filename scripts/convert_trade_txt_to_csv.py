@@ -34,13 +34,13 @@ def build_paths(run_date, copied=False):
     exchange = exchange_for_date(run_date)
     if copied:
         input_path = (
-            rf"\\100.125.204.120\c\Users\admin\Documents"
+            rf"\\100.110.76.52\c\Users\admin\Documents"
             rf"\AutoOnlineBackup\{exchange}\FO\{short_date}AUTOTRD.txt"
         )
         output_path = BASE_DIR / f"{short_date}AUTOTRD_grouped_copied.csv"
     else:
         input_path = (
-            rf"\\100.125.204.120\c"
+            rf"\\100.110.76.52\c\H43789"
             rf"\AutoOnlineBackup\{exchange}\FO\{short_date}AUTOTRD.txt"
         )
         output_path = BASE_DIR / f"{short_date}AUTOTRD_grouped.csv"
@@ -80,6 +80,7 @@ def read_rows(input_path):
     delimiter = "|" if "|" in first_line else ","
     exchange = "BSE" if delimiter == "|" else "NSE"
     rows = csv.reader(raw_text.splitlines(), delimiter=delimiter)
+    next(rows, None)
 
     return exchange, rows
 

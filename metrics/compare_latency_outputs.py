@@ -30,8 +30,8 @@ STRATX_CLIENT_ID = "Y05601"
 
 OUTPUT_CSV = "latency_comparison_Y05601.csv"
 
-# Keep matches close enough that unrelated trades are not paired by accident.
-MAX_MATCH_SECONDS = 20
+# Copied GreekSoft rows do not have the base order id available for matching.
+GREEK_MAX_MATCH_SECONDS = 20
 
 INPUT_DT_FMT = "%d %b %Y %H:%M:%S"
 INPUT_SLASH_DT_FMT = "%d/%m/%Y %H:%M:%S"
@@ -54,6 +54,7 @@ FIELDNAMES = [
     "GreekPriceDiff",
     "GreekQtyXPriceDiff",
     "ImpulseReferenceId",
+    "ImpulseClientId",
     "ImpulseCreatedAt",
     "ImpulseExecutedOn",
     "ImpulseDelaySecFromBaseCreated",
@@ -64,6 +65,7 @@ FIELDNAMES = [
     "ImpulsePriceDiff",
     "ImpulseQtyXPriceDiff",
     "VolatilityReferenceId",
+    "VolatilityClientId",
     "VolatilityCreatedAt",
     "VolatilityExecutedOn",
     "VolatilityDelaySecFromBaseCreated",
@@ -145,6 +147,34 @@ def nearest_unused(candidates, base_dt, used_indexes, max_abs_seconds):
     return candidates[best_index]
 
 
+def select_stratx_row(candidates, base_dt, base_price, side, client_mode):
+    if client_mode == "default":
+        client_rows = [
+            row for row in candidates
+            if row.get("client_id") == STRATX_CLIENT_ID
+        ]
+        return min(
+            client_rows,
+            key=lambda row: abs((row["_dt"] - base_dt).total_seconds()),
+            default=None,
+        )
+
+    selected_row = None
+    selected_diff = None
+
+    for row in candidates:
+        price_diff = adjusted_price_diff(side, row["price"], base_price)
+        if (
+            selected_diff is None
+            or client_mode == "best" and price_diff > selected_diff
+            or client_mode == "worst" and price_diff < selected_diff
+        ):
+            selected_diff = price_diff
+            selected_row = row
+
+    return selected_row
+
+
 def prepare_rows(
     base_grouped_csv,
     greeksoft_grouped_csv,
@@ -156,14 +186,8 @@ def prepare_rows(
     greek_rows = (
         read_csv(greeksoft_grouped_csv) if include_greeksoft else []
     )
-    impulse_rows = [
-        row for row in read_csv(stratx_impulse_csv)
-        if row.get("client_id") == STRATX_CLIENT_ID
-    ]
-    volatility_rows = [
-        row for row in read_csv(stratx_volatility_csv)
-        if row.get("client_id") == STRATX_CLIENT_ID
-    ]
+    impulse_rows = read_csv(stratx_impulse_csv)
+    volatility_rows = read_csv(stratx_volatility_csv)
 
     for row in base_rows:
         row["_dt"] = parse_base_time(row["TradeDateTime"])
@@ -187,7 +211,20 @@ def prepare_rows(
     for rows in greek_by_symbol_side.values():
         rows.sort(key=lambda row: row["_dt"])
 
-    return base_rows, greek_by_symbol_side, impulse_rows, volatility_rows
+    impulse_by_trigger = {}
+    for row in impulse_rows:
+        impulse_by_trigger.setdefault(row.get("trigger", "").strip(), []).append(row)
+
+    volatility_by_trigger = {}
+    for row in volatility_rows:
+        volatility_by_trigger.setdefault(row.get("trigger", "").strip(), []).append(row)
+
+    return (
+        base_rows,
+        greek_by_symbol_side,
+        impulse_by_trigger,
+        volatility_by_trigger,
+    )
 
 
 def build_comparison_rows(
@@ -196,8 +233,9 @@ def build_comparison_rows(
     stratx_impulse_csv=STRATX_IMPULSE_CSV,
     stratx_volatility_csv=STRATX_VOLATILITY_CSV,
     include_greeksoft=True,
+    client_mode="default",
 ):
-    base_rows, greek_by_key, impulse_rows, volatility_rows = prepare_rows(
+    base_rows, greek_by_key, impulse_by_trigger, volatility_by_trigger = prepare_rows(
         base_grouped_csv,
         greeksoft_grouped_csv,
         stratx_impulse_csv,
@@ -205,8 +243,6 @@ def build_comparison_rows(
         include_greeksoft,
     )
     used_greek_by_key = {key: set() for key in greek_by_key}
-    used_impulse = set()
-    used_volatility = set()
     output_rows = []
 
     for base in base_rows:
@@ -221,16 +257,25 @@ def build_comparison_rows(
                 greek_by_key.get(key, []),
                 base_dt,
                 used_greek_by_key.setdefault(key, set()),
-                MAX_MATCH_SECONDS,
+                GREEK_MAX_MATCH_SECONDS,
             )
             if include_greeksoft
             else None
         )
-        impulse = nearest_unused(
-            impulse_rows, base_dt, used_impulse, MAX_MATCH_SECONDS
+        base_order_id = base["OrderId"].strip()
+        impulse = select_stratx_row(
+            impulse_by_trigger.get(base_order_id, []),
+            base_dt,
+            base_price,
+            side,
+            client_mode,
         )
-        volatility = nearest_unused(
-            volatility_rows, base_dt, used_volatility, MAX_MATCH_SECONDS
+        volatility = select_stratx_row(
+            volatility_by_trigger.get(base_order_id, []),
+            base_dt,
+            base_price,
+            side,
+            client_mode,
         )
 
         greek_diff = (
@@ -265,6 +310,7 @@ def build_comparison_rows(
                     f"{amount_from_diff(base_qty, greek_diff):.2f}" if greek else ""
                 ),
                 "ImpulseReferenceId": impulse["reference_id"] if impulse else "",
+                "ImpulseClientId": impulse["client_id"] if impulse else "",
                 "ImpulseCreatedAt": impulse["created_at"] if impulse else "",
                 "ImpulseExecutedOn": impulse["executed_on"] if impulse else "",
                 "ImpulseDelaySecFromBaseCreated": (
@@ -287,6 +333,7 @@ def build_comparison_rows(
                 "VolatilityReferenceId": (
                     volatility["reference_id"] if volatility else ""
                 ),
+                "VolatilityClientId": volatility["client_id"] if volatility else "",
                 "VolatilityCreatedAt": volatility["created_at"] if volatility else "",
                 "VolatilityExecutedOn": volatility["executed_on"] if volatility else "",
                 "VolatilityDelaySecFromBaseCreated": (
@@ -317,9 +364,13 @@ def build_comparison_rows(
     return output_rows
 
 
-def write_comparison(run_date=TODAY, include_greeksoft=True):
+def write_comparison(run_date=TODAY, include_greeksoft=True, client_mode="default"):
     filenames = daily_filenames(run_date)
-    output_rows = build_comparison_rows(*filenames, include_greeksoft)
+    output_rows = build_comparison_rows(
+        *filenames,
+        include_greeksoft,
+        client_mode,
+    )
     output_path = BASE_DIR / OUTPUT_CSV
     fieldnames = (
         FIELDNAMES
@@ -351,11 +402,21 @@ def parse_args():
         action="store_true",
         help="Exclude the copied GreekSoft input and all Greek columns.",
     )
+    parser.add_argument(
+        "--client-mode",
+        choices=("default", "best", "worst"),
+        default="default",
+        help="Select Y05601, best client, or worst client for each StratX order.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    created_file, rows = write_comparison(args.date, not args.no_greeksoft)
+    created_file, rows = write_comparison(
+        args.date,
+        not args.no_greeksoft,
+        args.client_mode,
+    )
     print(f"Created comparison CSV: {created_file}")
     print(f"Rows: {len(rows)}")

@@ -13,7 +13,7 @@ from metrics.execute_delay import run_for_mode
 from scripts.convert_trade_txt_to_csv import exchange_for_date, run_for_date
 
 
-def run_workflow(run_date, include_greeksoft=True):
+def run_workflow(run_date, include_greeksoft=True, client_mode="default"):
     date_text = run_date.strftime("%Y%m%d")
     exchange = exchange_for_date(run_date)
     print(
@@ -30,7 +30,7 @@ def run_workflow(run_date, include_greeksoft=True):
     else:
         print("Skipping copied GreekSoft trade file and Greek comparison columns.")
 
-    output_path, rows = write_comparison(run_date, include_greeksoft)
+    output_path, rows = write_comparison(run_date, include_greeksoft, client_mode)
     print(f"Created comparison CSV: {output_path}")
     print(f"Rows: {len(rows)}")
     return output_path
@@ -52,9 +52,15 @@ def parse_args():
         action="store_true",
         help="Skip the copied GreekSoft file and omit Greek columns.",
     )
+    parser.add_argument(
+        "--client-mode",
+        choices=("default", "best", "worst"),
+        default="default",
+        help="Select Y05601, best client, or worst client for each StratX order.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_workflow(args.date, not args.no_greeksoft)
+    run_workflow(args.date, not args.no_greeksoft, args.client_mode)

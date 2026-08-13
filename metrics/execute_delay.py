@@ -25,6 +25,7 @@ def create_latency_csv(input_csv, output_csv):
     df = pd.read_csv(
         input_csv,
         usecols=["created_at", "executed_on", "reference_id", "status", "client_id", "trading_symbol", "quantity", "buyorsell", "initiated_price", "price", "trigger"],
+        low_memory=False,
     )
 
     # Filter TRADED rows
