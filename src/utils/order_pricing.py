@@ -94,8 +94,8 @@ def price_from_avg_ltp_or_fallback(side, tick_size, cache_symbol=None):
 
                 def get_offset(value):
                     if is_bse_expiry:
-                        return max(value * 0.38, 8)
-                    return max(value * 0.38, 18)
+                        return max(value * 0.30, 7.5)
+                    return max(value * 0.30, 15)
 
                 offset_ltp = get_offset(ltp)
 
