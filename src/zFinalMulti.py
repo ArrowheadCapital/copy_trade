@@ -6,6 +6,7 @@ import credentials as cre
 import datetime
 import time
 import os
+import shutil
 import threading
 
 import pandas as pd
@@ -47,10 +48,25 @@ if BROKER == "STRATX":
         H.printt("Instrument master updates at 8:50 AM. Exiting to avoid stale contracts.")
         exit()
 
-    # CHECK INSTRUMENT MASTER FILE EXISTS
-    if not cre.optionInstrumentPath or not os.path.exists(cre.optionInstrumentPath):
-        H.printt(f"Instrument file not found: {cre.optionInstrumentPath}")
-        exit() 
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local_instrument_path = os.path.join(repo_root, "options_instruments.csv")
+    configured_instrument_path = str(cre.optionInstrumentPath or "").strip()
+
+    if configured_instrument_path and os.path.isfile(configured_instrument_path):
+        try:
+            if os.path.abspath(configured_instrument_path) != os.path.abspath(local_instrument_path):
+                temp_instrument_path = f"{local_instrument_path}.tmp"
+                shutil.copy2(configured_instrument_path, temp_instrument_path)
+                os.replace(temp_instrument_path, local_instrument_path)
+            H.printt(f"Instrument master saved locally: {local_instrument_path}")
+        except Exception as e:
+            H.printt(f"Instrument master copy failed: {e}")
+
+    if not os.path.isfile(local_instrument_path):
+        H.printt(f"Instrument file not found at configured or local path: {configured_instrument_path}, {local_instrument_path}")
+        exit()
+
+    cre.optionInstrumentPath = local_instrument_path
 
 # Initialize the selected broker
 if BROKER == "GREEK":
