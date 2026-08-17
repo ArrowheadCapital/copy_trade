@@ -1063,17 +1063,26 @@ class greeksoft:
         try:
             status = str(self.get_orderbook_row_value(row, "order_status", "")).strip().upper()
             pending_qty = int(float(self.get_orderbook_row_value(row, "pending_qty", 0)))
-            return status == "CANCELLED" and pending_qty > 0
+            if pending_qty <= 0:
+                return False
+            if status == "CANCELLED":
+                return True
+            if status != "EXCHANGE REJECTED":
+                return False
+
+            exchange = str(self.get_orderbook_row_value(row, "exchange", "")).strip().upper()
+            error_code = int(float(self.get_orderbook_row_value(row, "errorCode", 0)))
+            return (exchange == "BSE" and error_code == 10008) or (exchange == "NSE" and error_code == 17070)
         except Exception as e:
             printt(f"GREEK_RETRY_STATUS_CHECK_FAILED | error={e} | row={row}")
             return False
 
 
-    def is_terminal_failed_greek_orderbook_row(self, row):
+    def is_terminal_failed_greek_orderbook_row(self, row, retryable_status):
         try:
             status = str(self.get_orderbook_row_value(row, "order_status", "")).strip().upper()
             pending_qty = int(float(self.get_orderbook_row_value(row, "pending_qty", 0)))
-            return status == "EXCHANGE REJECTED" and pending_qty > 0
+            return status == "EXCHANGE REJECTED" and pending_qty > 0 and not retryable_status
         except Exception as e:
             printt(f"GREEK_TERMINAL_STATUS_CHECK_FAILED | error={e} | row={row}")
             return False
@@ -1116,7 +1125,7 @@ class greeksoft:
             for row in rows:
                 try:
                     retryable_status = self.is_retryable_greek_orderbook_row(row)
-                    terminal_failure = self.is_terminal_failed_greek_orderbook_row(row)
+                    terminal_failure = self.is_terminal_failed_greek_orderbook_row(row, retryable_status)
                     if not retryable_status and not terminal_failure:
                         continue
 
