@@ -51,7 +51,7 @@ class StratX:
     redis_underlying_ltp_cache_ttl = 0.2
     stratx_order_workers = 20
     stratx_request_timeout = 15
-    stratx_http_max_attempts = 2
+    stratx_http_max_attempts = 3
     stratx_http_retry_sleep = 0.3
     stratx_thread_local = threading.local()
     stratx_order_pool = ThreadPoolExecutor(
@@ -60,7 +60,7 @@ class StratX:
     )
     retry_state_file = "state.json"
     retry_state_save_interval = 1
-    max_orderbook_retries = 1
+    max_orderbook_retries = 2
     retry_state_lock = threading.Lock()
     retry_state_save_lock = threading.Lock()
     retry_state_dirty = False

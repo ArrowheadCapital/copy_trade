@@ -1007,15 +1007,15 @@ Flow:
 6. Give every accepted child order its own root id and persist its original metadata and net metadata in memory.
 7. Enqueue each child into the shared five-worker GreekSoft order pool.
 8. In the worker, wait for the GreekSoft rate-limit slot.
-9. After the wait, read fresh Redis LTP/average. Values may be reused only within the 200 millisecond cache window.
-10. Apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
-11. Send a limit order (`order_type = "1"`) with the calculated price. If pricing fails, send the existing market fallback (`order_type = "2"`, `price = "0"`).
+9. After the wait, use price `0` before `09:17:00` local machine time. From `09:17:00` onward, read fresh Redis LTP/average; values may be reused only within the 200 millisecond cache window.
+10. From `09:17:00` onward, apply the same offset, tick-rounding, and circuit-clamp calculation used by StratX.
+11. Before `09:17:00`, send a market order (`order_type = "2"`, `price = "0"`). From `09:17:00` onward, send a limit order (`order_type = "1"`) with the calculated price, or the existing market fallback if pricing fails.
 12. Validate the response and map the returned `gorderid` to the child's root id.
 
 The payload uses:
 
 * exchange: `NSE`,
-* order type: `1` when Redis pricing succeeds, otherwise market fallback `2`,
+* order type: market `2` before `09:17:00` local machine time; from `09:17:00` onward, `1` when Redis pricing succeeds, otherwise market fallback `2`,
 * validity: `1`, so GreekSoft original and retry orders use IOC validity,
 * product: `0`,
 * strategyName: `AlgoSelf`,
@@ -1045,14 +1045,14 @@ For both Greeksoft NSE and BSE orders, `iprocli` and `AccountNumber` come from `
 GreekSoft order workers use:
 
 ```python
-greek_http_max_attempts = 2
+greek_http_max_attempts = 4
 greek_http_retry_sleep = 0.3
 greek_request_timeout = 15
 ```
 
-This permits one original HTTP request and at most one safe second attempt. A second attempt is allowed for a received non-success HTTP response or an immediate connection reset matching the narrow safe-reset condition. The worker waits for another rate-limit slot and recalculates price before the second request.
+This permits one original HTTP request and at most three additional attempts. Another attempt is allowed for a received non-success HTTP response or an immediate connection reset matching the narrow safe-reset condition. The worker waits for another rate-limit slot and recalculates price before each additional request.
 
-A successful HTTP response with `streaming_type = "IrisRejection"` and a reason containing both `throttle` and `reached` (case-insensitive) is treated as a rejected order rather than a successful submission. The rejected `gorderid`, complete option symbol and reason are logged, and the existing safe second HTTP attempt is used without registering the rejected order id.
+A successful HTTP response with `streaming_type = "IrisRejection"` and a reason containing both `throttle` and `reached` (case-insensitive) is treated as a rejected order rather than a successful submission. The rejected `gorderid`, complete option symbol and reason are logged, and another available HTTP attempt is used without registering the rejected order id.
 
 Read timeouts, delayed uncertain connection failures, and successful HTTP responses missing a `gorderid` are not automatically repeated because the broker may already have received the order.
 
@@ -1133,14 +1133,15 @@ processed failed gorderids by root
 
 The live order path updates state in memory and marks it dirty. A background saver writes through `greek_state.json.tmp` and atomically replaces `greek_state.json`.
 
-The current conservative retry condition is:
+The current retry conditions require positive `pending_qty` and either:
 
 ```text
 order_status == CANCELLED
-and pending_qty > 0
+or BSE EXCHANGE REJECTED with errorCode 10008
+or NSE EXCHANGE REJECTED with errorCode 17070
 ```
 
-`is_retryable_greek_orderbook_row()` owns this rule so selected exchange-rejection error codes can be added later without changing the rest of the retry lifecycle.
+`is_retryable_greek_orderbook_row()` owns these rules.
 
 For an eligible row, `retry_failed_greeksoft_orders()`:
 
@@ -1148,15 +1149,15 @@ For an eligible row, `retry_failed_greeksoft_orders()`:
 2. Ignores orders not registered by this copy-trade process.
 3. Resolves the original root.
 4. Skips already processed failed order ids.
-5. Enforces `max_greek_orderbook_retries` per root, currently `1`.
+5. Enforces `max_greek_orderbook_retries` per root, currently `3`.
 6. Loads the saved contract metadata and uses `pending_qty` after validating it against original quantity and lot size.
 7. Enqueues a retry task through the same five-worker pool.
 8. Recalculates price after the rate-limit wait.
 9. Maps the newly returned retry `gorderid` to the same root.
 
-When a later cancelled row reaches `max_greek_orderbook_retries`, its remaining `pending_qty` is released from GreekSoft net once. Retry enqueue/HTTP failure also releases that retry quantity once. The retry counter is still intentionally consumed and is not rolled back.
+When a later retryable row reaches `max_greek_orderbook_retries`, its remaining `pending_qty` is released from GreekSoft net once. Retry enqueue/HTTP failure also releases that retry quantity once. The retry counter is still intentionally consumed and is not rolled back.
 
-`Exchange Rejected` remains non-retryable. For an order mapped to a GreekSoft root, `pending_qty > 0` is released once and its `gorderid` is marked processed. Active/unknown statuses are not treated as terminal failures.
+Other `EXCHANGE REJECTED` rows remain non-retryable. For an order mapped to a GreekSoft root, `pending_qty > 0` is released once and its `gorderid` is marked processed. Active/unknown statuses are not treated as terminal failures.
 
 GreekSoft position reconciliation is not implemented by this retry feature.
 
@@ -1221,12 +1222,12 @@ market_order_offset = 8
 instrument_names_to_load = {"NIFTY", "SENSEX"}
 redis_ltp_avg_cache_ttl = 0.2
 stratx_order_workers = 20
-stratx_request_timeout = 5
-stratx_http_max_attempts = 1
+stratx_request_timeout = 15
+stratx_http_max_attempts = 3
 stratx_http_retry_sleep = 0.3
 retry_state_file = "state.json"
 retry_state_save_interval = 1
-max_orderbook_retries = 1
+max_orderbook_retries = 2
 net_state_file = "stratx_net_state.json"
 net_state_save_interval = 1
 net_buckets = ("NIFTY_CE", "NIFTY_PE", "SENSEX_CE", "SENSEX_PE")
@@ -1234,8 +1235,8 @@ net_buckets = ("NIFTY_CE", "NIFTY_PE", "SENSEX_CE", "SENSEX_PE")
 
 Notes:
 
-* `stratx_http_max_attempts = 1` means HTTP non-200 retry is currently effectively disabled. Increase it to retry failed HTTP requests.
-* `max_orderbook_retries = 1` means each client under a root order gets one orderbook-level retry.
+* `stratx_http_max_attempts = 3` means one original HTTP request plus at most two additional attempts.
+* `max_orderbook_retries = 2` means each client under a root order gets at most two orderbook-level retries.
 * `instrument_names_to_load = {"NIFTY", "SENSEX"}` means the StratX instrument master is filtered to those names.
 * `net_buckets` keeps only the running net buckets. It should not be split into positive and negative buckets.
 * Positive/negative net limits are config values in `credentials.py`, not separate state keys.

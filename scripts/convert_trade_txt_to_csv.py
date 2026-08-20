@@ -40,7 +40,7 @@ def build_paths(run_date, copied=False):
         output_path = BASE_DIR / f"{short_date}AUTOTRD_grouped_copied.csv"
     else:
         input_path = (
-            rf"\\100.110.76.52\c\H43789"
+            rf"\\100.110.76.52\c\E34740359"
             rf"\AutoOnlineBackup\{exchange}\FO\{short_date}AUTOTRD.txt"
         )
         output_path = BASE_DIR / f"{short_date}AUTOTRD_grouped.csv"

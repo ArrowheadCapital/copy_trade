@@ -109,11 +109,11 @@ class greeksoft:
     greek_instrument_names_to_load = {"NIFTY", "SENSEX"}
     greek_order_workers = 5
     greek_request_timeout = 15
-    greek_http_max_attempts = 3
+    greek_http_max_attempts = 4
     greek_http_retry_sleep = 0.3
     greek_retry_state_file = "greek_state.json"
     greek_retry_state_save_interval = 1
-    max_greek_orderbook_retries = 1
+    max_greek_orderbook_retries = 3
     greek_net_state_file = "greek_net_state.json"
     greek_net_state_save_interval = 1
     greek_net_buckets = ("NIFTY_CE", "NIFTY_PE", "SENSEX_CE", "SENSEX_PE")
@@ -820,6 +820,9 @@ class greeksoft:
 
     def get_greek_task_price(self, task):
         try:
+            if datetime.datetime.now().time() < datetime.time(9, 17):
+                return 0
+
             cache_symbol = str(task.get("cache_symbol", "")).strip().upper()
             if not cache_symbol:
                 printt(f"GREEK_PRICE_FALLBACK | root_id={task.get('root_order_id')} | reason=missing_cache_symbol")
