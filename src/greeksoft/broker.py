@@ -21,6 +21,9 @@ username = getattr(cre, "username", None)
 pw = getattr(cre, "pw", None)
 multiplier = getattr(cre, "multiplier", None)
 authurl = getattr(cre, "authurl", None)
+greek_session_token_file = getattr(cre, "greek_session_token_file", None)
+greek_gcid = getattr(cre, "greek_gcid", None)
+greek_auth_slack_webhook_url = os.getenv("GREEK_AUTH_SLACK_WEBHOOK_URL")
 
 niftyFreeze = getattr(cre, "niftyFreeze", None)
 bnfFreeze = getattr(cre, "bnfFreeze", None)
@@ -123,6 +126,9 @@ class greeksoft:
         global pw
         self.greek_thread_local = threading.local()
         self.greek_order_pool = ThreadPoolExecutor(max_workers=self.greek_order_workers, thread_name_prefix="greek_order")
+        self.greek_auth_recovery_lock = threading.Lock()
+        self.greek_auth_ready = threading.Event()
+        self.greek_auth_ready.set()
         self.greek_retry_state_lock = threading.RLock()
         self.greek_retry_state_save_lock = threading.Lock()
         self.greek_retry_state_dirty = False
@@ -142,25 +148,16 @@ class greeksoft:
 
         for i in range(4):
             try:
-                url = f"{authurl}/auth/greek/sessiontoken"
-                data = {
-                    "username": username,
-                    "password": pw,
-                    "validFor": "10d"
-                }
-                response = requests.post(url, json=data, timeout=self.greek_request_timeout)
-
-                session_token = response.json().get("sessionToken")
-                if not session_token:
-                    raise RuntimeError("GreekSoft authentication did not return sessionToken")
-
-                self.session_token = session_token
-                printt("Session Token Created")
+                self.session_token = self.resolve_greek_session_token()
                 self.getInstrument()
                 if getattr(self, "df", None) is None or self.df.empty:
                     raise RuntimeError("GreekSoft instrument master is empty")
 
-                self.login()
+                if greek_gcid:
+                    self.gcid = str(greek_gcid)
+                    printt("GREEK_GCID_CONFIGURED")
+                else:
+                    self.login()
                 if not getattr(self, "gcid", None):
                     raise RuntimeError("GreekSoft login did not return gcid")
 
@@ -178,6 +175,239 @@ class greeksoft:
 
         if not initialized:
             raise RuntimeError(f"GreekSoft initialization failed after 4 attempts: {last_error}")
+
+
+    def create_greek_session_token(self):
+        try:
+            url = f"{authurl}/auth/greek/sessiontoken"
+            data = {
+                "username": username,
+                "password": pw,
+                "validFor": "10d"
+            }
+            response = requests.post(url, json=data, timeout=self.greek_request_timeout)
+            session_token = str(response.json().get("sessionToken", "")).strip()
+            if not session_token:
+                raise RuntimeError("GreekSoft authentication did not return sessionToken")
+            printt("Session Token Created")
+            return session_token
+        except Exception as e:
+            raise RuntimeError(f"Error creating GreekSoft session token: {e}")
+
+
+    def read_greek_session_token_file(self):
+        if not greek_session_token_file:
+            return None
+        try:
+            with open(greek_session_token_file, "r") as token_file:
+                token_data = json.load(token_file)
+            session_token = str(token_data.get("session_token") or token_data.get("sessionToken") or "").strip()
+            if not session_token:
+                printt(f"GREEK_AUTH_FILE_TOKEN_MISSING | path={greek_session_token_file}")
+                return None
+            printt(f"GREEK_AUTH_FILE_TOKEN_LOADED | path={greek_session_token_file}")
+            return session_token
+        except FileNotFoundError:
+            printt(f"GREEK_AUTH_FILE_NOT_FOUND | path={greek_session_token_file}")
+            return None
+        except Exception as e:
+            printt(f"GREEK_AUTH_FILE_READ_FAILED | path={greek_session_token_file} | error={e}")
+            raise OSError(f"Error reading GreekSoft session token file: {e}")
+
+
+    def save_greek_session_token_file(self, session_token):
+        if not greek_session_token_file:
+            return False
+        temp_path = f"{greek_session_token_file}.{uuid.uuid4().hex}.tmp"
+        try:
+            token_data = {
+                "session_token": session_token,
+                "updated_at": datetime.datetime.now().isoformat(timespec="milliseconds")
+            }
+            with open(temp_path, "w") as token_file:
+                json.dump(token_data, token_file, indent=2)
+                token_file.write("\n")
+            os.replace(temp_path, greek_session_token_file)
+            printt(f"GREEK_AUTH_FILE_TOKEN_SAVED | path={greek_session_token_file}")
+            return True
+        except Exception as e:
+            printt(f"GREEK_AUTH_FILE_WRITE_FAILED | path={greek_session_token_file} | error={e}")
+            return False
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+
+
+    def notify_forced_greek_session_token(self, session_token, file_error):
+        message = f"GreekSoft shared session-token file is inaccessible. Copy Trade forcibly generated a session token. path={greek_session_token_file} | error={file_error} | session_token={session_token}"
+        if not greek_auth_slack_webhook_url:
+            printt(f"GREEK_AUTH_FORCED_TOKEN | slack=not_configured | path={greek_session_token_file} | error={file_error} | session_token={session_token}")
+            return False
+        try:
+            response = requests.post(greek_auth_slack_webhook_url, json={"text": message}, timeout=5)
+            status_code = int(getattr(response, "status_code", 0))
+            if status_code < 200 or status_code >= 300:
+                raise RuntimeError(f"Slack HTTP error: status={status_code}, body={getattr(response, 'text', '')}")
+            printt("GREEK_AUTH_FORCED_TOKEN_SLACK_SENT")
+            return True
+        except Exception as e:
+            printt(f"GREEK_AUTH_FORCED_TOKEN | slack=failed | slack_error={e} | path={greek_session_token_file} | error={file_error} | session_token={session_token}")
+            return False
+
+
+    def acquire_greek_session_token_file_lock(self):
+        if not greek_session_token_file:
+            return None
+        lock_path = f"{greek_session_token_file}.lock"
+        wait_started = time.monotonic()
+        while True:
+            try:
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(lock_fd)
+                return lock_path
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock_path) >= 30:
+                        os.remove(lock_path)
+                        printt(f"GREEK_AUTH_FILE_STALE_LOCK_REMOVED | path={lock_path}")
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() - wait_started >= 15:
+                    raise TimeoutError(f"Timed out waiting for GreekSoft session token file lock: {lock_path}")
+                time.sleep(0.1)
+            except Exception as e:
+                raise OSError(f"Error acquiring GreekSoft session token file lock: {e}")
+
+
+    def release_greek_session_token_file_lock(self, lock_path):
+        if not lock_path:
+            return
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            printt(f"GREEK_AUTH_FILE_LOCK_RELEASE_FAILED | path={lock_path} | error={e}")
+
+
+    def resolve_greek_session_token(self):
+        if not greek_session_token_file:
+            return self.create_greek_session_token()
+
+        lock_path = None
+        try:
+            lock_path = self.acquire_greek_session_token_file_lock()
+            session_token = self.read_greek_session_token_file()
+            if session_token:
+                return session_token
+            session_token = self.create_greek_session_token()
+            if not self.save_greek_session_token_file(session_token):
+                raise OSError("GreekSoft session token file could not be created")
+            return session_token
+        except Exception as e:
+            printt(f"GREEK_AUTH_STARTUP_FILE_FAILED | path={greek_session_token_file} | error={e}")
+            raise
+        finally:
+            self.release_greek_session_token_file_lock(lock_path)
+
+
+    def wait_for_greek_auth(self):
+        if not self.greek_auth_ready.is_set():
+            printt("GREEK_AUTH_WAIT | action=waiting_for_session_token")
+            self.greek_auth_ready.wait()
+        return self.session_token
+
+
+    def validate_greek_session_token(self, session_token):
+        try:
+            validation_gcid = greek_gcid or getattr(self, "gcid", None)
+            if not validation_gcid:
+                printt("GREEK_AUTH_FILE_TOKEN_INVALID | source=orderbook | reason=gcid_unavailable")
+                return False
+            headers = {"Authorization": session_token}
+            url = f"http://{urll}/getOrderBookDetailWithLegV2?exchangeType=ALL&ClientCode={validation_gcid}&Order_Status=ALL&Ordertype=All&gscid={username}"
+            response = requests.get(url, headers=headers, timeout=self.greek_request_timeout)
+
+            if response.status_code == 200:
+                printt("GREEK_AUTH_FILE_TOKEN_VALID | source=orderbook")
+                return True
+            printt(f"GREEK_AUTH_FILE_TOKEN_INVALID | source=orderbook | status={response.status_code}")
+            return False
+        except Exception as e:
+            raise RuntimeError(f"Error validating GreekSoft session token: {e}")
+
+
+    def recover_greek_session_token(self, failed_token):
+        with self.greek_auth_recovery_lock:
+            if self.session_token != failed_token:
+                printt("GREEK_AUTH_RECOVERY_REUSED | source=local_worker")
+                return self.session_token
+
+            self.greek_auth_ready.clear()
+            lock_path = None
+            recovered = False
+            try:
+                printt("GREEK_AUTH_RECOVERY_STARTED")
+                file_error = None
+                if greek_session_token_file:
+                    try:
+                        lock_path = self.acquire_greek_session_token_file_lock()
+                    except TimeoutError:
+                        raise
+                    except OSError as access_error:
+                        file_error = access_error
+                    else:
+                        try:
+                            file_token = self.read_greek_session_token_file()
+                            if file_token and file_token != failed_token and self.validate_greek_session_token(file_token):
+                                self.session_token = file_token
+                                recovered = True
+                                printt("GREEK_AUTH_RECOVERY_REUSED | source=shared_file")
+                                return self.session_token
+                        except OSError as read_error:
+                            file_error = read_error
+
+                self.session_token = self.create_greek_session_token()
+                if file_error:
+                    self.notify_forced_greek_session_token(self.session_token, file_error)
+                elif lock_path and not self.save_greek_session_token_file(self.session_token):
+                    self.notify_forced_greek_session_token(self.session_token, "shared token file write failed")
+                recovered = True
+                printt("GREEK_AUTH_RECOVERY_REGENERATED")
+                return self.session_token
+            except Exception as e:
+                printt(f"GREEK_AUTH_RECOVERY_FAILED | error={e}")
+                raise
+            finally:
+                self.release_greek_session_token_file_lock(lock_path)
+                if recovered:
+                    self.greek_auth_ready.set()
+                    printt("GREEK_AUTH_RECOVERY_FINISHED")
+
+
+    def recover_greek_auth_until_ready(self, failed_token, source):
+        printt(f"GREEK_AUTH_ERROR_DETECTED | source={source} | action=recover_session_token")
+        for recovery_attempt in range(1, self.greek_http_max_attempts + 1):
+            try:
+                return self.recover_greek_session_token(failed_token)
+            except Exception as e:
+                if recovery_attempt >= self.greek_http_max_attempts:
+                    self.greek_auth_ready.set()
+                    printt(f"GREEK_AUTH_RECOVERY_EXHAUSTED | attempts={self.greek_http_max_attempts} | source={source} | action=unblock_waiters | error={e}")
+                    raise RuntimeError(f"GreekSoft authentication recovery failed after {self.greek_http_max_attempts} attempts: {e}")
+                printt(f"GREEK_AUTH_RECOVERY_RETRY | attempt={recovery_attempt} | max={self.greek_http_max_attempts} | source={source} | error={e} | retry_in=1s")
+                time.sleep(1)
+
+
+    def is_greek_auth_error(self, response):
+        try:
+            return int(getattr(response, "status_code", 0)) == 401
+        except Exception:
+            return False
 
 
     def normalize_expiry_yyyymmdd(self, value):
@@ -941,10 +1171,11 @@ class greeksoft:
         request_start_ts = time.perf_counter()
         try:
             url = f"http://{urll}/NewOrderRequest"
-            headers = {"Authorization": self.session_token}
             session = self.get_greek_session()
 
             for attempt in range(1, self.greek_http_max_attempts + 1):
+                authorization_token = self.wait_for_greek_auth()
+                headers = {"Authorization": authorization_token}
                 wait_for_greek_order_slot()
                 order_price = self.get_greek_task_price(task)
                 payload, payload_price, order_type = self.build_greek_payload(task, order_price)
@@ -969,6 +1200,9 @@ class greeksoft:
 
                 if status_code < 200 or status_code >= 300:
                     printt(f"GREEK_HTTP_RETRY_RESPONSE | attempt={attempt} | max={self.greek_http_max_attempts} | status={status_code} | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | price={payload_price} | order_type={order_type} | http={http_ms:.1f}ms | response={response_text}")
+                    if self.is_greek_auth_error(response):
+                        self.recover_greek_auth_until_ready(authorization_token, f"order:{task.get('root_order_id')}")
+                        continue
                     if attempt < self.greek_http_max_attempts:
                         time.sleep(self.greek_http_retry_sleep)
                         continue
@@ -1029,17 +1263,27 @@ class greeksoft:
             start_ts = time.perf_counter()
             response = session.get(url, headers=headers, timeout=self.greek_request_timeout)
             elapsed_ms = (time.perf_counter() - start_ts) * 1000
-            printt(f"GREEK_SESSION_WARMUP_DONE | worker={worker_index} | status={getattr(response, 'status_code', 'unknown')} | http={elapsed_ms:.1f}ms")
+            status_code = int(getattr(response, "status_code", 0))
+            if status_code == 200:
+                printt(f"GREEK_SESSION_WARMUP_DONE | worker={worker_index} | status={status_code} | http={elapsed_ms:.1f}ms")
+                return True
+            printt(f"GREEK_SESSION_WARMUP_FAILED | worker={worker_index} | status={status_code} | http={elapsed_ms:.1f}ms | response={getattr(response, 'text', '')}")
+            return False
         except Exception as e:
             printt(f"GREEK_SESSION_WARMUP_FAILED | worker={worker_index} | error={e}")
+            return False
 
 
     def warmup_greek_sessions(self):
         try:
             futures = [self.greek_order_pool.submit(self.warmup_greek_worker_session, worker_index) for worker_index in range(self.greek_order_workers)]
-            for future in futures:
-                future.result()
-            printt(f"GREEK_SESSION_WARMUP_ALL_DONE | workers={self.greek_order_workers}")
+            results = [future.result() for future in futures]
+            success_count = sum(result is True for result in results)
+            failed_count = len(results) - success_count
+            if failed_count:
+                printt(f"GREEK_SESSION_WARMUP_INCOMPLETE | workers={len(results)} | success={success_count} | failed={failed_count}")
+            else:
+                printt(f"GREEK_SESSION_WARMUP_ALL_DONE | workers={len(results)} | success={success_count} | failed={failed_count}")
         except Exception as e:
             printt(f"Error warming GreekSoft sessions: {e}")
 
@@ -1217,26 +1461,28 @@ class greeksoft:
         try:
             global urll
             url = f"http://{urll}/getAllContract"
-            authorization_string = self.session_token
+            for _ in range(4):
+                authorization_token = self.wait_for_greek_auth()
+                headers = {
+                    "Authorization": authorization_token
+                }
+                response = requests.get(url, headers=headers, timeout=self.greek_request_timeout)
+                if self.is_greek_auth_error(response):
+                    printt(f"GREEK_AUTH_ERROR_RESPONSE | source=instrument | status={response.status_code} | response={getattr(response, 'text', '')}")
+                    self.recover_greek_auth_until_ready(authorization_token, "instrument")
+                    continue
+                raw_data = response.text.strip()
 
-            # Headers with Authorization
-            headers = {
-                "Authorization": authorization_string
-            }
-            # Make the GET request
-            response = requests.get(url, headers=headers, timeout=self.greek_request_timeout)
-
-            raw_data = response.text.strip()
-
-            # Convert to a Pandas DataFrame
-            df = pd.read_csv(StringIO(raw_data))
-            df = df.reset_index()
-            df.to_csv('abc.csv', index=False)
-            # df.columns = ['GreekToken', 'ExchangeToken', 'ExchangeSegMent', 'Series/InstType',
-            # 'Symbol', 'Description', 'ExpiryDate', 'OptionType', 'StrikePrice',
-            # 'TickSize', 'LotSize', 'TradingSymbol', 'SymbolWithExpiry']
-            self.df = df
-            return(df)
+                # Convert to a Pandas DataFrame
+                df = pd.read_csv(StringIO(raw_data), low_memory=False)
+                df = df.reset_index()
+                df.to_csv('abc.csv', index=False)
+                # df.columns = ['GreekToken', 'ExchangeToken', 'ExchangeSegMent', 'Series/InstType',
+                # 'Symbol', 'Description', 'ExpiryDate', 'OptionType', 'StrikePrice',
+                # 'TickSize', 'LotSize', 'TradingSymbol', 'SymbolWithExpiry']
+                self.df = df
+                return(df)
+            raise RuntimeError("GreekSoft instrument request authentication failed after recovery")
         except Exception as e:
             printt(f"Error in getInstrument: {e}")
             return None
@@ -1373,14 +1619,18 @@ class greeksoft:
                 global username
 
                 url = f"http://{urll}/getOrderBookDetailWithLegV2?exchangeType=ALL&ClientCode={self.gcid}&Order_Status=ALL&Ordertype=All&gscid={username}"
-
+                authorization_token = self.wait_for_greek_auth()
                 headers = {
-                    "Authorization": self.session_token
+                    "Authorization": authorization_token
                 }
 
                 try:
                     session = self.get_greek_session()
                     response = session.get(url, headers=headers, timeout=self.greek_request_timeout)
+                    if self.is_greek_auth_error(response):
+                        printt(f"GREEK_AUTH_ERROR_RESPONSE | source=orderbook | status={response.status_code} | response={getattr(response, 'text', '')}")
+                        self.recover_greek_auth_until_ready(authorization_token, "orderbook")
+                        continue
                     d = response.json()
                     return(d)
                 except Exception as e:

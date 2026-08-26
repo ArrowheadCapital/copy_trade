@@ -27,6 +27,10 @@ username = "GREEK_USERNAME"
 pw = "GREEK_PASSWORD"
 authurl = "http://greekapi.greeksoft.in:3001"
 
+# Optional shared GreekSoft authentication. Leave undefined for the existing login flow.
+# greek_session_token_file = r"TAILSCALE_SHARED_PATH\shared_session_token.json"
+# greek_gcid = "FIXED_GCID"
+
 # For placing orders:
 '''
 iprocli:0 for retailer
