@@ -405,7 +405,13 @@ class greeksoft:
 
     def is_greek_auth_error(self, response):
         try:
-            return int(getattr(response, "status_code", 0)) == 401
+            if int(getattr(response, "status_code", 0)) != 401:
+                return False
+            response_text = "".join(str(getattr(response, "text", "")).lower().split())
+            return (
+                ("latest" in response_text and "authorization" in response_text)
+                or ("invalid" in response_text and "token" in response_text)
+            )
         except Exception:
             return False
 
