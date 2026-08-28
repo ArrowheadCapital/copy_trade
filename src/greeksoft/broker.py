@@ -42,6 +42,10 @@ GREEK_KEEPALIVE_INTERVAL_SECONDS = 10
 GREEK_KEEPALIVE_PROBE_COUNT = 3
 
 
+def get_greek_trades_file():
+    return os.path.join("Trades", f"trades_{datetime.datetime.today():%Y%m%d}.csv")
+
+
 class GreekKeepAliveAdapter(requests.adapters.HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
         pool_kwargs["socket_options"] = HTTPConnection.default_socket_options + [
@@ -77,7 +81,7 @@ def getOrderStatus(orderId):
 
             for i in range(10):
                 try:
-                    df = pd.read_csv('trades.csv')
+                    df = pd.read_csv(get_greek_trades_file())
                     res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')[0]
                     return res
                 except Exception as e:
@@ -1348,7 +1352,7 @@ class greeksoft:
 
             for i in range(10):
                 try:
-                    df = pd.read_csv('trades.csv')
+                    df = pd.read_csv(get_greek_trades_file())
                     res = df[df['gorderid'] == int(orderId)].to_dict(orient='records')
                     if res:
                         return res[0]

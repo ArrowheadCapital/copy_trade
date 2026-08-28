@@ -80,6 +80,7 @@ else:
 today = datetime.datetime.today().strftime("%m%d")
 csvPathNSE = cre.pathNSE.format(formatted_date=today)
 csvPathBSE = cre.pathBSE.format(formatted_date=today)
+GREEK_TRADES_FILE = os.path.join("Trades", f"trades_{datetime.datetime.today():%Y%m%d}.csv")
 
 # ================= LICENSE =================
 # License validation removed per request.
@@ -272,7 +273,11 @@ def fetch_order_book():
                 time.sleep(0.25)
                 continue
 
-            df.to_csv("trades.csv", index=False)
+            if BROKER == "GREEK":
+                os.makedirs("Trades", exist_ok=True)
+                df.to_csv(GREEK_TRADES_FILE, index=False)
+            else:
+                df.to_csv("trades.csv", index=False)
             time.sleep(0.25)
         except Exception as e:
             H.printt(f"OrderBook Error: {e}")
