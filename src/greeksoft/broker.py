@@ -1115,8 +1115,11 @@ class greeksoft:
             status = str(self.get_orderbook_row_value(row, "order_status", "")).strip().upper()
             exchange = str(self.get_orderbook_row_value(row, "exchange", "")).strip().upper()
             error_code = int(float(self.get_orderbook_row_value(row, "errorCode", 0)))
-            force_market_price = status == "EXCHANGE REJECTED" and (
-                (exchange == "BSE" and error_code == 10008) or (exchange == "NSE" and error_code == 17070)
+            force_market_price = (
+                (status == "EXCHANGE REJECTED" and (
+                    (exchange == "BSE" and error_code == 10008) or (exchange == "NSE" and error_code == 17070)
+                ))
+                or (status == "CANCELLED" and error_code == 202)
             )
 
             task = dict(order_meta)
