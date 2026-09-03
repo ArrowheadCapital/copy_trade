@@ -1152,7 +1152,7 @@ For an eligible row, `retry_failed_greeksoft_orders()`:
 5. Enforces `max_greek_orderbook_retries` per root, currently `3`.
 6. Loads the saved contract metadata and uses `pending_qty` after validating it against original quantity and lot size.
 7. Enqueues a retry task through the same five-worker pool.
-8. Recalculates price after the rate-limit wait, except BSE `10008` and NSE `17070` retries, which submit as market orders with price `0`.
+8. Recalculates price after the rate-limit wait, except BSE `10008`, NSE `17070`, and `CANCELLED` `202` retries, which submit as market orders with price `0`.
 9. Maps the newly returned retry `gorderid` to the same root.
 
 When a later retryable row reaches `max_greek_orderbook_retries`, its remaining `pending_qty` is released from GreekSoft net once. Retry enqueue/HTTP failure also releases that retry quantity once. The retry counter is still intentionally consumed and is not rolled back.
