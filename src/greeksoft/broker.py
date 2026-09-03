@@ -824,6 +824,9 @@ class greeksoft:
 
     def get_greek_task_price(self, task):
         try:
+            if task.get("force_market_price"):
+                return 0
+
             if datetime.datetime.now().time() < datetime.time(9, 17):
                 return 0
 
@@ -1109,12 +1112,20 @@ class greeksoft:
             if pending_qty % lot_size != 0:
                 raise ValueError(f"Pending quantity is not a lot multiple: pending_qty={pending_qty}, lot_size={lot_size}")
 
+            status = str(self.get_orderbook_row_value(row, "order_status", "")).strip().upper()
+            exchange = str(self.get_orderbook_row_value(row, "exchange", "")).strip().upper()
+            error_code = int(float(self.get_orderbook_row_value(row, "errorCode", 0)))
+            force_market_price = status == "EXCHANGE REJECTED" and (
+                (exchange == "BSE" and error_code == 10008) or (exchange == "NSE" and error_code == 17070)
+            )
+
             task = dict(order_meta)
             task.update({
                 "root_order_id": str(root_order_id),
                 "source": "retry",
                 "qty": pending_qty,
                 "lot": pending_qty / lot_size,
+                "force_market_price": force_market_price,
             })
             return task
         except Exception as e:
