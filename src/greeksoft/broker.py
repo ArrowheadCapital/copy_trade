@@ -22,7 +22,6 @@ pw = getattr(cre, "pw", None)
 multiplier = getattr(cre, "multiplier", None)
 authurl = getattr(cre, "authurl", None)
 greek_session_token_file = getattr(cre, "greek_session_token_file", None)
-greek_gcid = getattr(cre, "greek_gcid", None)
 greek_auth_slack_webhook_url = os.getenv("GREEK_AUTH_SLACK_WEBHOOK_URL")
 
 niftyFreeze = getattr(cre, "niftyFreeze", None)
@@ -157,11 +156,7 @@ class greeksoft:
                 if getattr(self, "df", None) is None or self.df.empty:
                     raise RuntimeError("GreekSoft instrument master is empty")
 
-                if greek_gcid:
-                    self.gcid = str(greek_gcid)
-                    printt("GREEK_GCID_CONFIGURED")
-                else:
-                    self.login()
+                self.login()
                 if not getattr(self, "gcid", None):
                     raise RuntimeError("GreekSoft login did not return gcid")
 
@@ -328,7 +323,7 @@ class greeksoft:
 
     def validate_greek_session_token(self, session_token):
         try:
-            validation_gcid = greek_gcid or getattr(self, "gcid", None)
+            validation_gcid = getattr(self, "gcid", None)
             if not validation_gcid:
                 printt("GREEK_AUTH_FILE_TOKEN_INVALID | source=orderbook | reason=gcid_unavailable")
                 return False
@@ -369,6 +364,8 @@ class greeksoft:
                             file_token = self.read_greek_session_token_file()
                             if file_token and file_token != failed_token and self.validate_greek_session_token(file_token):
                                 self.session_token = file_token
+                                if not self.login():
+                                    raise RuntimeError("GreekSoft login failed after shared-token recovery")
                                 recovered = True
                                 printt("GREEK_AUTH_RECOVERY_REUSED | source=shared_file")
                                 return self.session_token
@@ -376,6 +373,8 @@ class greeksoft:
                             file_error = read_error
 
                 self.session_token = self.create_greek_session_token()
+                if not self.login():
+                    raise RuntimeError("GreekSoft login failed after generated-token recovery")
                 if file_error:
                     self.notify_forced_greek_session_token(self.session_token, file_error)
                 elif lock_path and not self.save_greek_session_token_file(self.session_token):
@@ -1451,6 +1450,7 @@ class greeksoft:
 
 
     def login(self):
+        response = None
         try:
             global urll
             global username
@@ -1477,7 +1477,7 @@ class greeksoft:
             self.gcid = str(data['response']['data']['gcid'])
             return(response.json())
         except Exception as e:
-            printt(f"Error in login: {e}")
+            printt(f"Error in login: {e} | response={getattr(response, 'text', '')}")
             return None
 
 
