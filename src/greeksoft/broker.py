@@ -156,7 +156,7 @@ class greeksoft:
                 if getattr(self, "df", None) is None or self.df.empty:
                     raise RuntimeError("GreekSoft instrument master is empty")
 
-                self.login()
+                self.login(recover_auth=True)
                 if not getattr(self, "gcid", None):
                     raise RuntimeError("GreekSoft login did not return gcid")
 
@@ -383,6 +383,7 @@ class greeksoft:
                 printt("GREEK_AUTH_RECOVERY_REGENERATED")
                 return self.session_token
             except Exception as e:
+                self.session_token = failed_token
                 printt(f"GREEK_AUTH_RECOVERY_FAILED | error={e}")
                 raise
             finally:
@@ -402,8 +403,9 @@ class greeksoft:
                     self.greek_auth_ready.set()
                     printt(f"GREEK_AUTH_RECOVERY_EXHAUSTED | attempts={self.greek_http_max_attempts} | source={source} | action=unblock_waiters | error={e}")
                     raise RuntimeError(f"GreekSoft authentication recovery failed after {self.greek_http_max_attempts} attempts: {e}")
-                printt(f"GREEK_AUTH_RECOVERY_RETRY | attempt={recovery_attempt} | max={self.greek_http_max_attempts} | source={source} | error={e} | retry_in=1s")
-                time.sleep(1)
+                retry_delay = 2 ** recovery_attempt
+                printt(f"GREEK_AUTH_RECOVERY_RETRY | attempt={recovery_attempt} | max={self.greek_http_max_attempts} | source={source} | error={e} | retry_in={retry_delay}s")
+                time.sleep(retry_delay)
 
 
     def is_greek_auth_error(self, response):
@@ -1449,7 +1451,7 @@ class greeksoft:
             printt(f"Error in retry_failed_greeksoft_orders: {e}")
 
 
-    def login(self):
+    def login(self, recover_auth=False):
         response = None
         try:
             global urll
@@ -1473,6 +1475,13 @@ class greeksoft:
             }
 
             response = requests.post(url, json=data, headers=headers, timeout=self.greek_request_timeout)
+            if self.is_greek_auth_error(response):
+                printt(f"GREEK_AUTH_ERROR_RESPONSE | source=login | status={response.status_code} | response={getattr(response, 'text', '')}")
+                if recover_auth:
+                    failed_token = self.session_token
+                    self.recover_greek_auth_until_ready(failed_token, "startup_login")
+                    return self.gcid
+                return None
             data = response.json()
             self.gcid = str(data['response']['data']['gcid'])
             return(response.json())

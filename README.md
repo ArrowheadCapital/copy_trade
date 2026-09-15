@@ -891,7 +891,7 @@ The GreekSoft broker implementation is the `greeksoft` class in `src/greeksoft/b
 
 When `greeksoft()` is created:
 
-1. It calls the Greeksoft auth API to get a session token.
+1. It resolves the GreekSoft session token from the configured shared token file, creating and saving one through the auth API when required.
 2. It downloads the Greeksoft instrument master.
 3. It logs in to get `gcid`.
 4. It filters the instrument master to NIFTY and SENSEX options, then precomputes the NIFTY/NSE contract-key map and SENSEX/BSE exchange-token map.
@@ -901,7 +901,7 @@ When `greeksoft()` is created:
 
 Before NSE/BSE order workers start, `src/zFinalMulti.py` also loads `greek_net_state.json`, starts its net-state saver, and replaces the saved net with a fresh GreekSoft orderbook sync when that sync succeeds. If startup sync fails, the same-day saved net remains active.
 
-Authentication, login, instrument download, warmup, order submission, and orderbook requests use bounded request timeouts. Initialization fails after four unsuccessful authentication/startup attempts instead of continuing with an unusable broker object.
+Authentication, login, instrument download, warmup, order submission, and orderbook requests use bounded request timeouts. If startup login returns a token-related HTTP 401, `login(recover_auth=True)` invokes the existing shared-token recovery. Recovery performs at most four attempts, waiting 2, 4, and 8 seconds between failures; a replacement token is retained and saved only after login succeeds. Recovery exhaustion unblocks waiting workers and raises an error. Initialization fails after four unsuccessful authentication/startup attempts instead of continuing with an unusable broker object.
 
 ### GreekSoft TCP Keepalive
 
