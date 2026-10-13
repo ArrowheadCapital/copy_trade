@@ -20,8 +20,8 @@ This README explains the complete project flow and the important functions in th
 | `src/stratx/broker.py` | Complete existing StratX implementation, including pricing, retry, net state, instrument lookup, and order placement. |
 | `src/stratx/stratx_reconciliation.py` | StratX desired-versus-traded comparison, correction lifecycle, and reconciliation-state persistence. |
 | `src/utils/broker_helpers.py` | Small set of genuinely shared broker helpers for logging compatibility and price/tick adjustment. |
-| `src/utils/order_pricing.py` | Complete shared GreekSoft/StratX cache-symbol, 200 ms Redis cache, offset-price, tick-rounding, circuit-clamp, error-handling, and logging implementation. |
-| `src/utils/fetch_circuit.py` | Redis connections, failover, LTP/average reads, underlying LTP, and circuit limits. |
+| `src/utils/order_pricing.py` | Complete shared GreekSoft/StratX cache-symbol, 200 ms Redis cache, offset-price, tick-rounding, circuit/TER clamping, error-handling, and logging implementation. |
+| `src/utils/fetch_circuit.py` | Redis connections, failover, LTP/average reads, underlying LTP, circuit limits, and TER limits. |
 | `src/utils/file_watcher.py` | Watchdog-based immediate source-file change detection. |
 | `src/utils/async_logger.py` | Non-blocking runtime logging. |
 | `src/utils/Helper.py` | Existing legacy/general helpers used by the runtime for logging and time waits. |
@@ -71,7 +71,7 @@ The main flow is:
 ```text
 NSE/BSE trade CSV changes
   -> process_nse_csv() / process_bse_csv()
-  -> combine rows by exchange order id
+  -> combine rows by exchange order id, full contract, and buy/sell side
   -> enqueue combined row
   -> NSE/BSE worker validates row
   -> selected broker places order
@@ -584,6 +584,7 @@ For NSE:
 ```python
 qty_col = 14
 exchange_order_id_col = 23
+combine_key_cols = [exchange_order_id_col, 7, 13]
 ```
 
 For BSE:
@@ -591,11 +592,12 @@ For BSE:
 ```python
 qty_col = 7
 exchange_order_id_col = 16
+combine_key_cols = [exchange_order_id_col, 5, 6]
 ```
 
 Before grouping, the code skips rows whose source id does not match `copy_source_id`, whose strategy is not in `source_strategy_names`, whose row timestamp exceeds `COPY_ALLOWED_DELAY_SECONDS`, or which fall outside the NIFTY/SENSEX option scope described above.
 
-The code then groups allowed new rows by exchange order id, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued.
+The code then groups allowed new rows by the complete combine key, keeps the first value for all columns, and sums only the quantity column. The combined rows are then queued. NSE uses exchange order id (`t[23]`), `SecurityDesc` (`t[7]`), and buy/sell (`t[13]`). BSE uses order number (`t[16]`), `Script` (`t[5]`), and buy/sell (`t[6]`).
 
 Important behavior:
 
@@ -879,7 +881,7 @@ If the price is less than or equal to 50, the fixed point offset is `market_orde
 
 ### Shared Order Pricing
 
-`src/utils/order_pricing.py` contains the complete shared pricing functions used by GreekSoft and StratX. The original pricing logic remains together: Redis cache-symbol construction, 200 millisecond LTP/average caching, Redis reads, LTP/average offset calculation, tick rounding, circuit lookup/clamping, try/except handling, and logging.
+`src/utils/order_pricing.py` contains the complete shared pricing functions used by GreekSoft and StratX. The original pricing logic remains together: Redis cache-symbol construction, 200 millisecond LTP/average caching, Redis reads, LTP/average offset calculation, tick rounding, circuit lookup/clamping, optional TER validation/clamping, try/except handling, and logging.
 
 Both broker classes call these functions directly. Broker-specific instrument lookup, payload construction, retries, and order submission remain in the respective broker implementations.
 
@@ -1187,7 +1189,7 @@ The live StratX path works like this:
 6. The retry-state background saver is started.
 7. The instrument master is filtered and cached so BSE contracts, tick sizes, lot sizes, OTM descriptions, and retry lookups are fast.
 8. The orderbook polling thread starts and repeatedly calls `getOrderBookALL()`.
-9. When a new NSE or BSE source trade row is detected, `src/zFinalMulti.py` combines rows by exchange order id and pushes the combined row into the NSE or BSE queue.
+9. When a new NSE or BSE source trade row is detected, `src/zFinalMulti.py` combines rows by exchange order id, full contract, and buy/sell side before pushing the combined row into the NSE or BSE queue.
 10. A worker validates market hours, symbol, quantity, and basic option fields.
 11. The worker calls either `placeOrderStratX_NSE()` or `placeOrderStratX_BSE()`.
 12. NSE fields are read directly from the NSE trade row. BSE fields are resolved from the instrument master using `ExchangeInstrumentID` and `Description`.
@@ -1360,6 +1362,8 @@ cache:CIRCUIT_NIFTY14JUL2619400CE
 
 If all Redis sources fail for circuit data, circuit clamping is skipped and the calculated price is left unchanged.
 
+After circuit clamping, pricing reads `cache:TER_<CACHE_SYMBOL>`. TER values are cached for 200 milliseconds and used only while their timestamp is not older than 120 seconds. If LTP is outside `TER_low_price` and `TER_high_price`, GreekSoft returns price `0` while StratX keeps the existing circuit-clamped price. Otherwise, the calculated price is clamped to the TER range. Missing or invalid TER data leaves the existing circuit-clamped price unchanged.
+
 ### `price_from_avg_ltp_or_fallback(...)`
 
 This is the central StratX price calculation part.
@@ -1370,7 +1374,7 @@ For normal copied orders:
 * if Redis LTP is unavailable, stale, invalid, or no Redis symbol is available, price is sent as `0`,
 * it then applies offset for market order,
 * it rounds to tick size,
-* at last clamps to circuit limits.
+* at last clamps to circuit limits and, when available, validates/clamps against TER limits.
 
 Retry and OTM pricing also try the active Redis source first, fail over to another configured source, and send price `0` if all Redis LTP sources fail.
 

@@ -2,7 +2,7 @@ import datetime
 import time
 
 from src.utils.broker_helpers import printt, round_to_tick
-from src.utils.fetch_circuit import get_circuit_limits, get_ltp_avg
+from src.utils.fetch_circuit import get_circuit_limits, get_ltp_avg, get_ter_limits
 
 
 today_expiry_token = datetime.date.today().strftime("%d%b%y").upper()
@@ -46,6 +46,33 @@ def apply_circuit_clamp(price, cache_symbol):
         return price
 
 
+def apply_ter_clamp(price, ltp, cache_symbol, zero_if_ltp_outside_ter=False):
+    try:
+        if not cache_symbol:
+            return price
+
+        limits = get_ter_limits(cache_symbol)
+        if not limits:
+            return price
+
+        low_price = float(limits["TER_low_price"])
+        high_price = float(limits["TER_high_price"])
+        ltp = float(ltp)
+
+        if ltp < low_price or ltp > high_price:
+            printt(f"TER_LTP_OUTSIDE_RANGE | symbol={cache_symbol} | ltp={ltp} | low={low_price} | high={high_price}")
+            return 0 if zero_if_ltp_outside_ter else price
+
+        if price > high_price:
+            return high_price
+        if price < low_price:
+            return low_price
+        return price
+    except Exception as e:
+        printt(f"Error in apply_ter_clamp: {e}")
+        return price
+
+
 def build_cache_symbol(name, expiry, strike, right):
     try:
         strike_val = float(strike)
@@ -80,7 +107,7 @@ def get_redis_ltp_avg(cache_symbol):
         return 0, 0
 
 
-def price_from_avg_ltp_or_fallback(side, tick_size, cache_symbol=None):
+def price_from_avg_ltp_or_fallback(side, tick_size, cache_symbol=None, zero_if_ltp_outside_ter=False):
     try:
         if cache_symbol:
             ltp, reference_price = get_redis_ltp_avg(cache_symbol)
@@ -116,6 +143,7 @@ def price_from_avg_ltp_or_fallback(side, tick_size, cache_symbol=None):
                 if price <= 0:
                     price = float(tick_size)
                 price = apply_circuit_clamp(price, cache_symbol)
+                price = apply_ter_clamp(price, ltp, cache_symbol, zero_if_ltp_outside_ter)
                 return price
 
         return 0

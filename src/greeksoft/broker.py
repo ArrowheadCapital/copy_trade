@@ -1073,7 +1073,12 @@ class greeksoft:
                 return 0
 
             normalized_side = self.normalize_order_side(task.get("side"))
-            price = price_from_avg_ltp_or_fallback(normalized_side, float(task.get("tick_size", 0)), cache_symbol)
+            price = price_from_avg_ltp_or_fallback(
+                normalized_side,
+                float(task.get("tick_size", 0)),
+                cache_symbol,
+                zero_if_ltp_outside_ter=True,
+            )
             if price <= 0:
                 printt(f"GREEK_PRICE_FALLBACK | root_id={task.get('root_order_id')} | symbol={cache_symbol} | reason=pricing_unavailable")
                 return 0

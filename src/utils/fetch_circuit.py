@@ -16,6 +16,8 @@ redis_lock = threading.Lock()
 active_redis_index = 0
 circuit_limits_cache = {}
 CIRCUIT_LIMITS_CACHE_TTL = 10.0
+ter_limits_cache = {}
+TER_LIMITS_CACHE_TTL = 0.2
 
 
 def get_redis_sources():
@@ -316,4 +318,79 @@ def get_circuit_limits(cache_symbol, host="100.103.231.7", port=6379, db=1):
             
     except Exception as e:
         printt(f"Error in get_circuit_limits: {e}")
+        return None
+
+
+def get_ter_limits(cache_symbol):
+    try:
+        cache_key = str(cache_symbol).strip().upper()
+        if not cache_key:
+            return None
+
+        now = perf_counter()
+        cached = ter_limits_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_result = cached
+            if now - cached_at <= TER_LIMITS_CACHE_TTL:
+                return cached_result
+
+        key = f"cache:TER_{cache_key}"
+        sources, order = get_redis_order()
+
+        for index in order:
+            source = sources[index]
+            source_name = source.get("name", f"redis_{index}")
+
+            try:
+                raw_value = get_redis_client(source).get(key)
+                if raw_value is None:
+                    printt(f"REDIS_TER_FAILED | source={source_name} | key={key} | reason=missing_key")
+                    continue
+
+                data = json.loads(raw_value)
+                ts = data.get("ts")
+                low_price = data.get("TER_low_price")
+                high_price = data.get("TER_high_price")
+
+                if ts is None or low_price is None or high_price is None:
+                    printt(f"REDIS_TER_FAILED | source={source_name} | key={key} | reason=missing_field")
+                    continue
+
+                tick_timestamp = parse_redis_time(ts)
+                if tick_timestamp is None:
+                    printt(f"REDIS_TER_FAILED | source={source_name} | key={key} | reason=bad_time")
+                    continue
+
+                age = time.time() - tick_timestamp
+                if age > 120:
+                    printt(f"REDIS_TER_FAILED | source={source_name} | key={key} | reason=stale | age={age:.2f}s")
+                    continue
+
+                low_price = float(low_price)
+                high_price = float(high_price)
+                if low_price < 0 or high_price < low_price:
+                    printt(f"REDIS_TER_FAILED | source={source_name} | key={key} | reason=invalid_range | low={low_price} | high={high_price}")
+                    continue
+
+                result = {
+                    "ts": ts,
+                    "TER_low_price": low_price,
+                    "TER_high_price": high_price,
+                    "source": source_name,
+                }
+                ter_limits_cache[cache_key] = (now, result)
+
+                if index != active_redis_index:
+                    make_redis_active(index, key)
+
+                return result
+
+            except Exception as e:
+                printt(f"REDIS_TER_FAILED | source={source_name} | key={key} | error={e}")
+
+        printt(f"REDIS_TER_ALL_FAILED | key={key}")
+        return None
+
+    except Exception as e:
+        printt(f"Error in get_ter_limits: {e}")
         return None

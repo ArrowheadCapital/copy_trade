@@ -608,12 +608,13 @@ def process_nse_csv():
 
         qty_col = 14
         exchange_order_id_col = 23
+        combine_key_cols = [exchange_order_id_col, 7, 13]
         agg_map = {col: "first" for col in new_rows.columns}
         agg_map[qty_col] = "sum"
         
         combined_rows = (
             new_rows.groupby(
-                exchange_order_id_col,
+                combine_key_cols,
                 dropna=False,
                 sort=False,
                 as_index=False,
@@ -710,12 +711,13 @@ def process_bse_csv():
 
         qty_col = 7
         exchange_order_id_col = 16
+        combine_key_cols = [exchange_order_id_col, 5, 6]
         agg_map = {col: "first" for col in new_rows.columns}
         agg_map[qty_col] = "sum"
         
         combined_rows = (
             new_rows.groupby(
-                exchange_order_id_col,
+                combine_key_cols,
                 dropna=False,
                 sort=False,
                 as_index=False,
