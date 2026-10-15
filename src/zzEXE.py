@@ -7,6 +7,7 @@ import io
 import os
 import importlib
 import queue
+import time
 from pathlib import Path
 
 repository_root = str(Path(__file__).resolve().parent.parent)
@@ -275,6 +276,34 @@ def sync_broker_net():
 
     threading.Thread(target=sync_worker, daemon=True).start()
 
+position_sync_ui_lock = threading.Lock()
+
+
+def sync_greek_positions():
+    broker_object = globals().get("brokerObj")
+    if broker_object is None or not hasattr(broker_object, "position_sync"):
+        print("[WARN] Start algo before syncing GreekSoft positions")
+        return
+    if not position_sync_ui_lock.acquire(blocking=False):
+        return
+    position_sync_button.config(state='disabled')
+    started = time.monotonic()
+
+    def worker():
+        try:
+            print(f"[INFO] GREEK Position Sync: {broker_object.position_sync.sync()}")
+        except Exception as error:
+            print(f"[WARN] GREEK Position Sync error: {error}")
+        finally:
+            def enable():
+                position_sync_button.config(state='normal')
+                position_sync_ui_lock.release()
+            delay = max(0, int((5 - (time.monotonic() - started)) * 1000))
+            root.after(delay, enable)
+
+    threading.Thread(target=worker, daemon=True, name="greek_position_sync").start()
+
+
 def on_close():
     try:
         broker_object = globals().get("brokerObj")
@@ -491,6 +520,10 @@ pause_button.grid(row=0, column=action_column + 1, padx=4, pady=4)
 if cre.broker.upper() in ("STRATX", "GREEK"):
     sync_button = ttk.Button(button_frame, text="Sync Net", command=sync_broker_net, style="Start.TButton")
     sync_button.grid(row=0, column=action_column + 2, padx=4, pady=4)
+
+if cre.broker.upper() == "GREEK":
+    position_sync_button = ttk.Button(button_frame, text="Sync Positions", command=sync_greek_positions, style="Start.TButton")
+    position_sync_button.grid(row=0, column=action_column + 3, padx=4, pady=4)
 
 # Redirect stdout/stderr
 sys.stdout = RedirectText("stdout")

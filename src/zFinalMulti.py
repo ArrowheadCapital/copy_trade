@@ -221,6 +221,20 @@ def is_symbol_allowed(symbol):
     return str(symbol).upper().strip() in ALLOWED_SYMBOLS
 
 
+def greek_copy_orders_busy():
+    return bool(NSE_QUEUE.unfinished_tasks or BSE_QUEUE.unfinished_tasks)
+
+
+def greek_source_files_processed(signatures):
+    # Ensure the copier has seen the same versions that Sync just read.
+    processed_times = {csvPathNSE: nse_last_mtime, csvPathBSE: bse_last_mtime}
+    return all(
+        brokerObj.position_sync.signature(path) == signature
+        and os.path.getmtime(path) <= processed_times[path]
+        for path, signature in signatures.items()
+    )
+
+
 # Commented out for future use
 # def check_position_limit(symbol, quantity, price=100):
 #     """Check if position is within limits"""
@@ -472,6 +486,18 @@ elif BROKER == "GREEK":
     brokerObj.load_greek_net_state()
     brokerObj.start_greek_net_state_saver()
     brokerObj.sync_greek_net_from_traded_orders(source="startup")
+    brokerObj.position_sync.settlement_seconds = max(5.0, float(getattr(cre, "greek_sync_settlement_seconds", 5.0)))
+    brokerObj.position_sync.configure(
+        nse_path=csvPathNSE,
+        bse_path=csvPathBSE,
+        source_id=COPY_SOURCE_ID,
+        strategies=COPY_SOURCE_STRATEGY_NAMES,
+        multiplier=cre.multiplier,
+        headers=(NSE_EXPECTED_HEADER, BSE_EXPECTED_HEADER),
+        market_open=is_market_open,
+        copy_busy=greek_copy_orders_busy,
+        source_consumed=greek_source_files_processed,
+    )
 
 # ================= START 40 WORKERS =================
 NSE_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -539,6 +565,7 @@ def process_nse_csv():
     global nse_seen, last_nse, nse_last_mtime, nse_header_valid
     if not os.path.exists(csvPathNSE):
         return
+    sync_ingestion_started = False
     try:
         if nse_header_valid is False:
             return
@@ -547,6 +574,10 @@ def process_nse_csv():
         with csv_state_lock:
             if current_mtime <= nse_last_mtime:
                 return
+
+        if BROKER == "GREEK":
+            brokerObj.position_sync.begin_ingestion()
+            sync_ingestion_started = True
 
         if nse_header_valid is None:
             header_valid = validate_source_header(csvPathNSE, ",", NSE_EXPECTED_HEADER, "NSE")
@@ -633,12 +664,16 @@ def process_nse_csv():
 
     except Exception as e:
         H.printt(f"NSE file error: {e}")
+    finally:
+        if sync_ingestion_started:
+            brokerObj.position_sync.end_ingestion()
 
 
 def process_bse_csv():
     global bse_seen, last_bse, bse_last_mtime, bse_header_valid
     if not os.path.exists(csvPathBSE):
         return
+    sync_ingestion_started = False
     try:
         if bse_header_valid is False:
             return
@@ -647,6 +682,10 @@ def process_bse_csv():
         with csv_state_lock:
             if current_mtime <= bse_last_mtime:
                 return
+
+        if BROKER == "GREEK":
+            brokerObj.position_sync.begin_ingestion()
+            sync_ingestion_started = True
 
         if bse_header_valid is None:
             header_valid = validate_source_header(csvPathBSE, "|", BSE_EXPECTED_HEADER, "BSE")
@@ -736,6 +775,9 @@ def process_bse_csv():
 
     except Exception as e:
         H.printt(f"BSE file error: {e}")
+    finally:
+        if sync_ingestion_started:
+            brokerObj.position_sync.end_ingestion()
 
 
 file_observer = None

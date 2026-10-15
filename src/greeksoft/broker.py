@@ -15,6 +15,7 @@ from collections import deque
 from urllib3.connection import HTTPConnection
 from src.utils.broker_helpers import createLogFile, printt, saveInLogFile
 from src.utils.order_pricing import build_cache_symbol, price_from_avg_ltp_or_fallback
+from src.greeksoft.position_sync import GreekPositionSync
 
 urll = getattr(cre, "urll", None)
 username = getattr(cre, "username", None)
@@ -146,6 +147,7 @@ class greeksoft:
         self.greek_net_released_roots = set()
         self.greek_nse_contract_by_key = {}
         self.greek_bse_contract_by_token = {}
+        self.position_sync = GreekPositionSync(self)
         initialized = False
         last_error = None
 
@@ -513,6 +515,11 @@ class greeksoft:
 
             self.greek_nse_contract_by_key = nse_contract_by_key
             self.greek_bse_contract_by_token = bse_contract_by_token
+            self.position_sync.master = {
+                (exchange, row.symbol_key, int(float(row.ExchangeToken))): row
+                for exchange, contracts in (("NSE", nse_contract_by_key.values()), ("BSE", bse_contract_by_token.values()))
+                for row in contracts
+            }
 
             printt(f"GREEK_CONTRACT_PRECOMPUTE_DONE | nse={len(nse_contract_by_key)} | bse={len(bse_contract_by_token)}")
         except Exception as e:
@@ -801,6 +808,7 @@ class greeksoft:
                 self.greek_net_state_dirty = True
 
             printt(f"{log_name} | root_id={root_order_id} | bucket={bucket} | signed_qty={signed_qty} | current={next_net} | reason={reason}")
+            self.position_sync.failed(root_order_id)
             return True
         except Exception as e:
             printt(f"GREEK_NET_FAILURE_ADJUST_ERROR | root_id={task.get('root_order_id')} | reason={reason} | error={e}")
@@ -809,7 +817,9 @@ class greeksoft:
 
     def handle_greek_order_future_result(self, future, task):
         try:
-            if future.result():
+            order_id = future.result()
+            self.position_sync.result(task, order_id)
+            if order_id or task.get("submission_uncertain"):
                 return
             source = str(task.get("source", "")).strip().lower()
             log_name = "GREEK_NET_RELEASE" if source == "retry" else "GREEK_NET_ROLLBACK"
@@ -1188,6 +1198,7 @@ class greeksoft:
 
     def submit_greek_order_task(self, task):
         request_start_ts = time.perf_counter()
+        self.position_sync.submitting(task)
         try:
             url = f"http://{urll}/NewOrderRequest"
             session = self.get_greek_session()
@@ -1200,6 +1211,7 @@ class greeksoft:
                 payload, payload_price, order_type = self.build_greek_payload(task, order_price)
 
                 attempt_start_ts = time.perf_counter()
+                task["submission_uncertain"] = True
                 try:
                     response = session.post(url, json=payload, headers=headers, timeout=self.greek_request_timeout)
                 except Exception as request_error:
@@ -1211,6 +1223,7 @@ class greeksoft:
                     printt(f"GREEK_CONNECTION_RESET_RETRY | attempt={attempt} | max={self.greek_http_max_attempts} | error_code=10054 | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | http={http_ms:.1f}ms | action=reset_session_reprice_retry")
                     self.reset_greek_session()
                     session = self.get_greek_session()
+                    task["submission_uncertain"] = False
                     continue
 
                 http_ms = (time.perf_counter() - attempt_start_ts) * 1000
@@ -1218,6 +1231,7 @@ class greeksoft:
                 status_code = int(getattr(response, "status_code", 200))
 
                 if status_code < 200 or status_code >= 300:
+                    task["submission_uncertain"] = False
                     printt(f"GREEK_HTTP_RETRY_RESPONSE | attempt={attempt} | max={self.greek_http_max_attempts} | status={status_code} | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | price={payload_price} | order_type={order_type} | http={http_ms:.1f}ms | response={response_text}")
                     if self.is_greek_auth_error(response):
                         self.recover_greek_auth_until_ready(authorization_token, f"order:{task.get('root_order_id')}")
@@ -1234,6 +1248,7 @@ class greeksoft:
                 streaming_type = str(response_root.get("streaming_type", "")).strip()
 
                 if streaming_type == "IrisRejection":
+                    task["submission_uncertain"] = False
                     rejection_reason = str(response_data.get("reason", "")).strip()
                     normalized_reason = rejection_reason.casefold()
                     if "throttle" in normalized_reason and "reached" in normalized_reason:
@@ -1250,6 +1265,7 @@ class greeksoft:
                     raise RuntimeError(f"GreekSoft response missing gorderid: {response_json}")
 
                 self.register_greek_order_id(task.get("root_order_id"), gorderid)
+                task["submission_uncertain"] = False
                 total_ms = (time.perf_counter() - request_start_ts) * 1000
                 printt(f"GREEK_ORDER_SUBMIT_DONE | root_id={task.get('root_order_id')} | source={task.get('source')} | gorderid={gorderid} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | price={payload_price} | order_type={order_type} | http={http_ms:.1f}ms | total={total_ms:.1f}ms")
                 return gorderid
@@ -1257,14 +1273,17 @@ class greeksoft:
             return None
         except Exception as e:
             total_ms = (time.perf_counter() - request_start_ts) * 1000
-            printt(f"GREEK_ORDER_SUBMIT_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | total={total_ms:.1f}ms | error={e}")
+            status = "GREEK_ORDER_SUBMIT_UNKNOWN" if task.get("submission_uncertain") else "GREEK_ORDER_SUBMIT_FAILED"
+            printt(f"{status} | root_id={task.get('root_order_id')} | source={task.get('source')} | sym={task.get('cache_symbol') or task.get('tradeSymbol')} | side={task.get('side')} | qty={task.get('qty')} | total={total_ms:.1f}ms | error={e}")
             return None
 
 
     def enqueue_greek_order_task(self, task):
         try:
-            future = self.greek_order_pool.submit(self.submit_greek_order_task, task)
-            future.add_done_callback(lambda completed_future, order_task=dict(task): self.handle_greek_order_future_result(completed_future, order_task))
+            with self.position_sync.lock:
+                self.position_sync.queued(task)
+                future = self.greek_order_pool.submit(self.submit_greek_order_task, task)
+                future.add_done_callback(lambda completed_future, order_task=task: self.handle_greek_order_future_result(completed_future, order_task))
             return future
         except Exception as e:
             printt(f"GREEK_ORDER_ENQUEUE_FAILED | root_id={task.get('root_order_id')} | source={task.get('source')} | error={e}")
@@ -1393,6 +1412,18 @@ class greeksoft:
 
 
     def retry_failed_greeksoft_orders(self, rows):
+        if not isinstance(rows, list):
+            return
+        # Scan history without blocking normal enqueues. Lock only a failed row
+        # whose retry/release can change the expected destination quantity.
+        for row in rows:
+            retryable = self.is_retryable_greek_orderbook_row(row)
+            if retryable or self.is_terminal_failed_greek_orderbook_row(row, retryable):
+                with self.position_sync.lock:
+                    self._retry_failed_greeksoft_orders([row])
+
+
+    def _retry_failed_greeksoft_orders(self, rows):
         try:
             if not isinstance(rows, list) or not rows:
                 return
@@ -1563,6 +1594,11 @@ class greeksoft:
 
 
     def placeOrderBSE(self,gtoken,side,name,lot,qua,dt,source_order_id=""):
+        with self.position_sync.lock:
+            return self._placeOrderBSE(gtoken, side, name, lot, qua, dt, source_order_id)
+
+
+    def _placeOrderBSE(self,gtoken,side,name,lot,qua,dt,source_order_id=""):
         try:
             global multiplier
 
@@ -1595,6 +1631,11 @@ class greeksoft:
 
 
     def placeOrder(self,gtoken,side,name,lot,qua,dt,source_order_id=""):
+        with self.position_sync.lock:
+            return self._placeOrder(gtoken, side, name, lot, qua, dt, source_order_id)
+
+
+    def _placeOrder(self,gtoken,side,name,lot,qua,dt,source_order_id=""):
         try:
             global multiplier
 
@@ -1623,6 +1664,33 @@ class greeksoft:
         except Exception as e:
             printt(f"Error in placeOrder: {e}")
             return []
+
+
+    def greek_sync_child_quantity(self, exchange, quantity, dt):
+        freeze = niftyFreeze if exchange == "NSE" else sensexFreeze
+        splits = getFreezeQua(freeze, dt.LotSize, quantity)
+        if sum(splits) != quantity:
+            raise ValueError("Invalid sync freeze quantity or lot size")
+        return splits[0]
+
+
+    def place_greek_sync_correction(self, exchange, side, quantity, dt):
+        """Quantity already contains the multiplier. Reuse original pricing, net and retry paths."""
+        freeze = niftyFreeze if exchange == "NSE" else sensexFreeze
+        splits = getFreezeQua(freeze, dt.LotSize, quantity)
+        if sum(splits) != quantity:
+            raise ValueError("Invalid sync freeze quantity or lot size")
+        submitted = 0
+        for split in splits:
+            task = self.create_original_greek_order_task(exchange, dt.GreekToken, side, dt.Symbol, split, dt)
+            if not task:
+                break
+            task["sync_correction"] = True
+            task["source_order_id"] = task["root_order_id"]
+            self.register_greek_order_meta(task["root_order_id"], task)
+            if self.enqueue_greek_order_task(task) is not None:
+                submitted += 1
+        return submitted
 
 
     def getOrderStatus(self,orderId):
