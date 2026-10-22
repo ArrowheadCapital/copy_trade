@@ -300,15 +300,28 @@ class GreekPositionSync:
         if recovered_contract_total and not unresolved:
             # An uncertain submission kept its risk reservation. Replace it from the
             # same snapshot, so accepted fills are retained and absent orders release risk.
-            included_symbols = {"NIFTY", "SENSEX"} if exchanges is None else {
-                symbol for exchange, symbol in (("NSE", "NIFTY"), ("BSE", "SENSEX")) if exchange in exchanges}
-            net = {bucket: 0 for bucket in self.broker.greek_net_buckets if bucket.split("_")[0] in included_symbols}
-            for key, quantity in expected.items():
-                net[f"{key[1]}_{key[4]}"] += quantity
-            with self.broker.greek_net_lock:
-                self.broker.greek_net_position.update(net)
-                self.broker.greek_net_state_dirty = True
+            self.refresh_risk(expected, exchanges, unresolved)
         return expected, instruments, unresolved
+
+    def refresh_risk(self, expected, exchanges, unresolved):
+        """Caller holds self.lock; preserve skipped and uncertain risk buckets."""
+        included_symbols = {symbol for exchange, symbol in (("NSE", "NIFTY"), ("BSE", "SENSEX"))
+                            if exchanges is None or exchange in exchanges}
+        uncertain = {f"{key[1]}_{key[4]}" for key in unresolved}
+        net = {bucket: 0 for bucket in self.broker.greek_net_buckets
+               if bucket.split("_")[0] in included_symbols and bucket not in uncertain}
+        for key, quantity in expected.items():
+            bucket = f"{key[1]}_{key[4]}"
+            if bucket in net:
+                net[bucket] += quantity
+        with self.broker.greek_net_lock:
+            changed = {bucket: quantity for bucket, quantity in net.items()
+                       if self.broker.greek_net_position.get(bucket) != quantity}
+            if changed:
+                self.broker.greek_net_position.update(changed)
+                self.broker.greek_net_state_dirty = True
+        if changed:
+            logger.info("GREEK_POSITION_SYNC_RISK_REFRESH | net=%s", changed)
 
     def sync(self):
         result = self._sync()
@@ -370,7 +383,24 @@ class GreekPositionSync:
             # Source targets/versions, difference and copy generation must agree.
             if (first[0], first[2], first[4], first[5], first[6], first[7]) == (second[0], second[2], second[4], second[5], second[6], second[7]):
                 return second
-            logger.info("GREEK_POSITION_SYNC_RECHECK | attempt=%s | reason=positions_changed", attempt + 1)
+            # Only build diagnostic details for a discarded pair; no extra fetches.
+            changes = {}
+            for index, name in ((0, "source_target_changed"), (2, "source_file_changed"),
+                                (4, "unresolved_orders_changed"), (5, "correction_changed"),
+                                (6, "copy_activity_changed"), (7, "skipped_exchanges_changed")):
+                before, after = first[index], second[index]
+                if before == after:
+                    continue
+                if isinstance(before, dict):
+                    default = 0 if index in (0, 5) else None
+                    changes[name] = {key: {"before": before.get(key, default), "after": after.get(key, default)}
+                                     for key in sorted(set(before) | set(after))
+                                     if before.get(key, default) != after.get(key, default)}
+                else:
+                    changes[name] = {"before": sorted(before) if isinstance(before, set) else before,
+                                     "after": sorted(after) if isinstance(after, set) else after}
+            logger.info("GREEK_POSITION_SYNC_RECHECK | attempt=%s | reason=%s | changes=%s",
+                        attempt + 1, ",".join(changes), changes)
         return None
 
     def _sync(self):
@@ -408,6 +438,16 @@ class GreekPositionSync:
                     if lot <= 0 or abs(difference) % lot:
                         raise ValueError("Correction is not a valid lot multiple")
                     corrections.append((key, difference, dt))
+            with self.lock:
+                if self.copy_revision != copy_revision or self.busy() or copy_busy():
+                    return "Copy processing resumed; press Sync again"
+                # Use the confirmed expected position, not the target: the existing
+                # placement path will reserve each correction on top of this base.
+                expected = {key: targets.get(key, 0) - differences.get(key, 0)
+                            for key in set(targets) | set(differences)}
+                exchanges = {exchange for exchange, path in zip(("NSE", "BSE"), self.config[:2])
+                             if path in signatures}
+                self.refresh_risk(expected, exchanges, unresolved)
             submitted = 0
             for key, difference, dt in corrections:
                 # Submit one freeze child at a time, releasing the lock while it sends.

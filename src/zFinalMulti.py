@@ -126,14 +126,14 @@ BSE_EXPECTED_HEADER = (
 # DAILY_LOSS_LIMIT = -50000
 
 # ================= HELPER FUNCTIONS =================
-def read_csv_safely(path, sep=',', max_retries=3, skiprows=0):
+def read_csv_safely(path, sep=',', max_retries=3, skiprows=0, allow_empty=False):
     for attempt in range(max_retries):
         try:
             df = pd.read_csv(path, header=None, engine="python", sep=sep, skiprows=skiprows, on_bad_lines='skip')
-            return df if not df.empty else None
+            return df if allow_empty or not df.empty else None
         
         except pd.errors.EmptyDataError:
-            return None
+            return pd.DataFrame() if allow_empty else None
         
         except Exception as e:
             if attempt < max_retries - 1:
@@ -591,7 +591,9 @@ def process_nse_csv():
                     nse_last_mtime = current_mtime
                 return
 
-        df = read_csv_safely(csvPathNSE, skiprows=1)
+        # A successful empty read still consumes this file version. Failed reads
+        # remain None and must be retried without advancing the modification time.
+        df = read_csv_safely(csvPathNSE, skiprows=1, allow_empty=BROKER == "GREEK")
         if df is None:
             return
 
@@ -699,7 +701,7 @@ def process_bse_csv():
                     bse_last_mtime = current_mtime
                 return
 
-        df = read_csv_safely(csvPathBSE, sep="|", skiprows=1)
+        df = read_csv_safely(csvPathBSE, sep="|", skiprows=1, allow_empty=BROKER == "GREEK")
         if df is None:
             return
 

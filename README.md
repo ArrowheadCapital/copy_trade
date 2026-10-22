@@ -1173,9 +1173,17 @@ Sync Positions reads the complete current source NSE/BSE AUTOTRD files, applies 
 
 Source availability is checked independently for NSE and BSE only during manual Sync. If the source folder is accessible but today's file is missing, blank, header-only, or has no matching supported source trades, Sync reports no file/data and skips that exchange. Missing data is never interpreted as a zero target: the skipped exchange's destination positions, pending records and risk buckets are left untouched by Sync. If neither exchange has source data, no order-book request or correction is made. An inaccessible/missing parent folder, file permission failure, malformed header or incomplete row remains an error and stops Sync. The normal copier retains its existing file handling. A valid history containing matching trades that net to zero is still a valid zero target.
 
+For normal GreekSoft source ingestion, `read_csv_safely(..., allow_empty=True)` distinguishes a successful empty read from a failed read. A validated header-only file consumes its modification time once, preventing repeated false copy-activity/recheck signals. Later appended rows are still copied; failed reads remain retryable without advancing the modification time. StratX keeps the reader's default behaviour.
+
 Each freeze child is tracked in memory before enqueue. Sync waits while CSV ingestion, copy queues, submissions, or retries are processing. Expected destination quantity is traded quantity plus remaining local pending quantity, with active untracked broker orders counted once. Partial fills reduce pending; final failures release it; retries retain the same root. The source files and order book must be complete, mapped, and stable. New copy activity stops further Sync submissions. Sync submits one freeze child at a time through the existing worker pool so it cannot queue a large correction ahead of normal copy orders. Repeated requests have both a backend lock and a five-second button cooldown.
 
+Before reserving corrections, `refresh_risk()` aligns the existing `greek_net_position` buckets with the confirmed destination traded plus pending quantities, not the source target. Otherwise, a manual destination trade could leave reservations based on a stale local net. Skipped exchanges and buckets with unresolved contracts are preserved. The same refresh can repair stale net quantities when positions already match. Updates use the existing locks and state saver and log `GREEK_POSITION_SYNC_RISK_REFRESH`; this adds no new request or wait to normal copying.
+
+Discarded comparison pairs log `GREEK_POSITION_SYNC_RECHECK | attempt=... | reason=... | changes=...`. Reasons distinguish source targets, source-file versions, unresolved contracts, correction quantities, copy activity and skipped exchanges. Changed fields include before/after values, with exact contract keys for quantity differences. Stable pairs do not emit recheck logs; diagnostics do not fetch another book themselves.
+
 Sync children send their own root UUID through `tag`/`userTag`; normal copied orders retain the source order ID. A timeout or a response missing `gorderid` is uncertain and is not immediately repeated or released from risk. UUID-tagged Sync orders are recovered when those tags are returned in the order book. Otherwise, after a five-second settlement period (optionally increased with `greek_sync_settlement_seconds` in credentials), two successful stable contract snapshots at least one second apart replace the uncertain child with the contract's total traded/active quantity. Press Sync again to complete these settlement checks. This automatic fallback assumes broker visibility has caught up; a broker acceptance appearing only after both checks remains a possible duplicate-order risk. Invalid/failed order-book responses never clear uncertainty.
+
+The 15-second Sync budget is a maximum, not a promise to wait until uncertainty resolves. A stable comparison with unresolved contracts can return a waiting message early and require another click. Late-visibility duplication was reproduced offline: an accepted BUY 325 returned no ID and stayed invisible for 30 seconds; fallback allowed a replacement BUY 325, creating actual exposure of 650. Once the original became visible, a later manual Sync sold 325. Correct final net does not make this a clean pass: temporary excess exposure and extra trades remain a known limitation. No automatic follow-up Sync is scheduled, and increasing the settlement period alone does not prove an invisible order failed. Live broker visibility timing and full UUID return have not been verified.
 
 Unknown-submission blocking is contract-specific (exchange, underlying, expiry, strike and CE/PE). An `UNKNOWN` order does not stop corrections for another contract or a skipped exchange. If a newly submitted Sync child becomes `UNKNOWN`, Sync leaves it pending and stops further children only for that contract; other confirmed contracts can continue within the existing time limit. Normal queued/submitting copy activity still interrupts Sync as described above.
 
@@ -2289,3 +2297,188 @@ Example:
 cache:LTP_NIFTY28JUL2624500PE
 cache:CIRCUIT_NIFTY28JUL2624500PE
 ```
+
+## Recreating the offline GreekSoft simulation
+
+The temporary interactive simulator was removed on 2026-10-22. Its launchers,
+transport module, GUI hooks and simulator-only tests are no longer installed.
+The production Sync fixes and offline regression tests remain. Existing
+`simulation_runs/` output is retained and ignored by Git; do not delete user
+results when rebuilding the harness. The instructions below are a reconstruction
+guide, not commands for an already-installed simulator. For an exact restoration,
+use a separate saved simulation branch/backup if available; the guide alone is
+not a copy of the removed source code.
+
+### Files and minimal integration
+
+Recreate on a separate branch or clearly isolated temporary change set:
+
+| File | Responsibility |
+| --- | --- |
+| `src/greeksoft/simulation.py` | Dummy credentials, local instrument master, fake HTTP/order book, scenario controls and GUI panel. No live initialization at import. |
+| `scripts/simulate_greeksoft.py` | Install safety guards first, create an isolated run, inject dummy credentials, then launch the real GUI or headless runtime. |
+| `run_simulation.cmd` | Change to the repository directory and invoke `.venv\Scripts\python.exe -B scripts\simulate_greeksoft.py %*`; stop if the venv is missing. |
+| `scripts/test_greek_simulation_contracts.py` | Temporary offline tests for contract selection, source/manual payloads, validation and delay controls. |
+
+Expose `activate(run_dir, multiplier=5)`, `install_runtime(helper, broker_module,
+namespace)` and `attach_controls(root, namespace)` from the simulation module.
+The launcher calls `activate()` before importing the production GUI/runtime.
+Add only these opt-in hooks; leave ordinary `run.cmd` and production credentials
+untouched:
+
+```python
+# src/zFinalMulti.py: after the existing module reloads, before initialization.
+if os.getenv("COPY_TRADE_SIMULATION") == "1":
+    from src.greeksoft.simulation import install_runtime
+    install_runtime(H, HG.greeksoft_broker, globals())
+
+# src/zzEXE.py: immediately before root.mainloop().
+if os.getenv("COPY_TRADE_SIMULATION") == "1":
+    from src.greeksoft.simulation import attach_controls
+    attach_controls(root, globals())
+```
+
+Because the harness changes the working directory to its run folder, temporarily
+resolve `exec_script()` inputs with
+`open(os.path.join(repository_root, script_name), 'r')`. On removal restore only
+that expression and the two hooks, not whole files. The existing repository-root
+`sys.path` setup predates simulation and must remain.
+
+### Safety boundary: install before production imports
+
+1. Create `simulation_runs/<YYYYMMDD_HHMMSS>_<unique-id>/` inside this repository.
+2. Block real socket connections/DNS, `requests` transport, subprocesses and
+   shell execution. Use both monkeypatches and an audit hook that raises on
+   attempted external I/O; record attempts and fail the test if any occur.
+3. Reject writes, creation, deletion and rename destinations outside the run
+   folder. Set `sys.dont_write_bytecode = True` and launch with `-B` so imports
+   cannot write caches outside the sandbox. Read-only imports/master reads are
+   allowed. Test these guards before importing the trading runtime.
+4. Intercept `credentials` import and reload with an in-memory dummy module
+   (a meta-path finder/loader). Supply `SIMULATION_ONLY` account values, fake
+   endpoints, empty Redis sources and run-folder paths. Never import the real
+   credentials module or reuse a real token/session file.
+5. Set `COPY_TRADE_SIMULATION=1` only in this isolated launcher. Change its working
+   directory to the run folder before running the real GUI/runtime. Label the
+   GUI explicitly `OFFLINE SIMULATION - NO REAL ORDERS`.
+
+### Use the real pipeline; replace only external boundaries
+
+- Load local `abc.csv` as the master. Select NIFTY/NSEFO and SENSEX/BSEFO OPTIDX
+  contracts, nearest available future expiry (or latest fixture expiry if all
+  expired). Offer multiple strikes and CE/PE; keep default contracts for existing
+  callers. Source rows, manual orders and book rows must use the selected contract.
+- Extract `NSE_EXPECTED_HEADER` and `BSE_EXPECTED_HEADER` from the runtime with
+  AST parsing, not a live runtime import. Generate comma-delimited NSE and
+  pipe-delimited BSE `source/*_AUTOTRD.txt` files with those exact layouts.
+  Example filters were `SIM_SOURCE` and `SIM_STRATEGY`.
+- Source buttons append source quantities only. The real watcher/filter/grouping,
+  copy queues, multiplier, worker pool, pricing arithmetic, reservations, freeze
+  splitting, retry processing and `Sync Positions` must run unchanged.
+- Patch GreekSoft token resolution/login to dummy results, `getInstrument()` to
+  return the local master, and `get_greek_session()` to return an in-process
+  object implementing `get()`/`post()`. Never fall through to live transport.
+- Implement fake `NewOrderRequest` submission and
+  `getOrderBookDetailWithLegV2` responses using the payloads from the real builder.
+  Maintain broker order IDs, side, quantities, statuses, fills and visibility
+  separately. Return copied rows so later mutations cannot change old snapshots.
+- Use `Trades/trades_20261014.csv`, if present, only as a schema example, never
+  as initial positions from another account. Book rows need `gorderid`, `token`,
+  `exch_Token`, `exchange`, `scripName`, expiry, strike, option type, `side`, `qty`,
+  `traded_qty`, `pending_qty`, `order_status`, `errorCode` and `userTag`.
+  `token` is the master GreekToken; `exch_Token` is ExchangeToken. Populate
+  returned `userTag` and leave `tag` blank to reproduce the fixture format.
+- Replace market-data reads in both `fetch_circuit` and `order_pricing` with
+  fresh local values (example LTP/reference 100, circuit/TER bounds 1-1000).
+  Do not replace the production price calculations themselves.
+- Use one consistent market-time clock, e.g. 13:00, for runtime checks and source
+  timestamps; bypass only the simulator's startup time gate. Do not alter live
+  market hours. Keep fake market-data timestamps fresh.
+- Use real master lot sizes. Historical test settings were multiplier 5, NIFTY
+  freeze 3510, SENSEX freeze 1000 and test net limits of 1,000,000 per direction.
+  Verify current production freeze values before copying them into new dummy
+  settings; do not silently import live credentials. Save active settings per run.
+
+### Required controls and outcomes
+
+Provide underlying, expiry/strike/CE/PE and lot selection; normal source BUY/SELL;
+missed-copy BUY/SELL; manual destination BUY/SELL; and an armed next-child outcome.
+Missed-copy source rows use timestamps 300 seconds old with a 60-second live copy
+delay: normal copying skips them, while manual Sync reads them. Manual destination
+trades change only the simulated broker book, not source history or local
+reservations; never multiply manual quantities.
+
+| Armed outcome | Simulated behaviour |
+| --- | --- |
+| `fill` | Accept and fully fill. |
+| `partial_cancel` | Fill half the whole lots, cancel the remainder with code 202; real retry logic handles only the remainder. |
+| `cancel` | Zero fill, cancelled remainder/code 202. |
+| `reject` | Zero fill, `Exchange Rejected`, code 999; terminal release, not automatic retry. |
+| `missing_id_accepted` | Accept/fill but return no `gorderid`; expose the row only after its configured visibility delay. |
+| `missing_id_absent` | Return no `gorderid` and create no broker order. |
+
+An armed outcome affects one submitted child, then returns to `fill`. Previous
+defaults were 30 ms submission response, 0.2-second fill delay and 0.5-second
+missing-ID visibility delay. Add bounded, validated GUI delay controls:
+
+- Retry fill delay: test 15 seconds, applying only to retries, not the original
+  order. Recognize retry ownership using the same tag, token, side and unfilled
+  quantity of a failed/cancelled order (not just a matching strike).
+- Missing-ID visibility delay: test 30 seconds, applying only to
+  `missing_id_accepted`. The order can fill while invisible; do not delay the fill
+  itself or every normal order-book row. Record hidden and visible events.
+
+### Verification and run instructions after rebuilding
+
+First run the preserved production checks, which do not need the interactive
+simulator, login, Redis or broker requests:
+
+```bat
+.venv\Scripts\python.exe -B scripts\test_greek_position_sync.py
+.venv\Scripts\python.exe -B scripts\test_ter_pricing.py
+```
+
+Test the rebuilt simulator controls and I/O guards offline, then let the operator
+launch `run_simulation.cmd` (`--multiplier 5`). Press Start Algo and wait for the
+watcher before changing source data. Optional `--headless` should run the real
+runtime/threads with bounded waits and assertions, not reimplement reconciliation.
+Do not launch the interactive pipeline or headless replay without user approval.
+
+Each run should save `simulation_config.json`, default `contracts.json`, available
+`contract_options.json`, timestamped `events.jsonl` (source/manual actions,
+payloads, outcomes, fills and visibility), generated source files, runtime logs,
+retry/net state and the trade CSV produced by the real background poller.
+Headless verification can also save `report.json`.
+
+Compare every exact contract target against its destination fills; check submitted
+payload quantities, UUID ownership, retries, pending quantities and saved net
+buckets. A correct final aggregate net alone can hide duplicate orders followed
+by compensating exits. Do not press Sync Net during reservation-fix tests, since
+it would independently repair the counter being tested.
+
+Minimum scenario checklist:
+
+1. Matching positions: no correction; multiplier applied once; freeze-sized
+   children sum exactly to the correction and have different root UUIDs.
+2. Manual destination trades, source-missing positions and multiple strikes/CE/PE
+   with offsetting totals: correct each exact contract, not just its bucket net.
+3. Missing/blank/header-only source: skip only that exchange; later appended
+   trades activate it; inaccessible locations fail safely.
+4. Source activity between Sync comparisons: force an overlap, verify changed
+   comparison logs and bounded rechecks, and allow normal copying to continue.
+5. Missing-ID accepted/absent orders, separately for normal copy and Sync; no
+   duplicate replacement when accepted fills are already visible.
+6. Partial fills and cancellations: retry only unfilled quantity; terminal
+   rejection releases once; repeated Sync clicks do not duplicate orders.
+7. Retry pending for 15 seconds: Sync counts traded plus pending once and submits
+   nothing extra; eventual fills and saved net match the target.
+8. Accepted normal order hidden for 30 seconds: deliberately reproduce the known
+   fallback limitation. A replacement and later compensating exit is a detected
+   duplicate-exposure case, not a clean pass just because the final net matches.
+
+When removing a rebuilt harness, remove only its launcher/module/temporary tests,
+the two guarded hooks and the simulation-only script-path change. Preserve
+`refresh_risk()`, detailed recheck logs, the GreekSoft `allow_empty` reader fix,
+production regression tests and unrelated edits. Retain run output unless the
+user explicitly asks to delete it. Offline success does not certify live tag
+round-tripping, order-book latency, connectivity or rate limits.
