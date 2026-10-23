@@ -145,9 +145,21 @@ class GreekPositionSync:
                 for row in reader:
                     if not row or not any(v.strip() for v in row):
                         continue
-                    if len(row) != len(header):
-                        raise ValueError(f"{exchange} incomplete source row")
-                    id_index, strategy_index = (27, 26) if exchange == "NSE" else (23, 22)
+                    if exchange == "NSE":
+                        # NSE exports can end with an extra comma; discard only
+                        # empty fields beyond the complete, fixed-position layout.
+                        if len(row) < len(header) or any(v.strip() for v in row[len(header):]):
+                            raise ValueError(f"{exchange} incomplete source row")
+                        row = row[:len(header)]
+                        id_index, strategy_index = 27, 26
+                    else:
+                        # The compact BSE export combines book/instrument at 17
+                        # and shifts the tail left once. Reject other short layouts.
+                        compact = (len(row) == 23 and row[17].strip().upper() == "L,BSE OPT"
+                                   and row[20].strip().upper() == "CARRYFORWARD")
+                        if len(row) != len(header) and not compact:
+                            raise ValueError(f"{exchange} incomplete source row")
+                        id_index, strategy_index = -1, -2
                     if row[id_index].strip().upper() != source_id or row[strategy_index].strip().upper() not in strategies:
                         continue
                     if exchange == "NSE":
