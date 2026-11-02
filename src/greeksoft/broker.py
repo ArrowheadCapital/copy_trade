@@ -9,6 +9,7 @@ import atexit
 import pandas as pd
 from io import StringIO
 import credentials as cre
+import shared_config
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
@@ -25,12 +26,12 @@ authurl = getattr(cre, "authurl", None)
 greek_session_token_file = getattr(cre, "greek_session_token_file", None)
 greek_auth_slack_webhook_url = os.getenv("GREEK_AUTH_SLACK_WEBHOOK_URL")
 
-niftyFreeze = getattr(cre, "niftyFreeze", None)
-bnfFreeze = getattr(cre, "bnfFreeze", None)
-sensexFreeze = getattr(cre, "sensexFreeze", None)
-bankex = getattr(cre, "bankex", None)
-midcpniftyFreeze = getattr(cre, "midcpnifty", None)
-finniftyFreeze = getattr(cre, "finnifty", None)
+niftyFreeze = shared_config.niftyFreeze
+bnfFreeze = shared_config.bnfFreeze
+sensexFreeze = shared_config.sensexFreeze
+bankex = shared_config.bankex
+midcpniftyFreeze = shared_config.midcpnifty
+finniftyFreeze = shared_config.finnifty
 
 iprocli = getattr(cre, "iprocli", None)
 AccountNumber = getattr(cre, "AccountNumber", None)

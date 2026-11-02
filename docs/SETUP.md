@@ -79,7 +79,7 @@ In the source account's CTCL terminal:
 
 ## 5. Set freeze quantities and copy settings
 
-Copy the applicable, current freeze quantities into these existing fields in `credentials.py`:
+Freeze quantities are stored in the Git-tracked `shared_config.py` file. Review these fields there:
 
 ```text
 niftyFreeze
@@ -90,7 +90,11 @@ midcpnifty
 finnifty
 ```
 
-Then configure the multiplier, source account ID, source strategy filter, and destination broker. For example:
+The broker and Redis modules read these settings directly from `shared_config.py`. Do not add them or import them in `credentials.py`. For an existing installation, remove the old freeze assignments and `redis_sources` list from `credentials.py`.
+
+Restart Copy Trade after updating `shared_config.py`.
+
+Then configure the multiplier, source account ID, source strategy filter, and destination broker in `credentials.py`. For example:
 
 ```python
 multiplier = 1
@@ -158,9 +162,9 @@ SENSEX_PE_NEG_NET = 0
 
 Replace every zero with the intended account limit before starting. Values are quantities, not lot counts. Both `POS_NET` and `NEG_NET` are non-negative magnitudes: a positive limit of `100` and a negative limit of `200` allow net quantities from `-200` to `+100`. Zero leaves no allowance on that side.
 
-## 9. Add Redis sources for either broker
+## 9. Review Redis sources for either broker
 
-Set the following in `credentials.py`:
+The Git-tracked `shared_config.py` contains the following sources:
 
 ```python
 redis_sources = [

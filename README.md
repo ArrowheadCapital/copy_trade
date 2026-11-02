@@ -9,6 +9,10 @@ The project currently supports two broker paths:
 
 This README explains the complete project flow and the important functions in the codebase.
 
+## Windows Setup
+
+For installation on a new PC, follow the [step-by-step setup guide](docs/SETUP.md). It covers Python/Git/Tailscale, branch selection, both brokers, source exports, net limits, Redis, and Windows network credentials.
+
 ## Repository Structure
 
 | Path | Purpose |
@@ -28,7 +32,8 @@ This README explains the complete project flow and the important functions in th
 | `scripts/` | Standalone operational and conversion scripts that are not imported by the live runtime. |
 | `metrics/` | Offline execution-delay, HTTP-delay, grouping, and comparison utilities. |
 | `docs/` | Supporting documentation, including the simulator guide and historical resolved issues. |
-| `credentials.py` | User-specific broker, path, quantity, Redis, and strategy configuration. |
+| `credentials.py` | User-specific broker, path, multiplier, net limits, and strategy configuration. |
+| `shared_config.py` | Git-tracked freeze quantities and Redis sources, read directly by broker and pricing modules. |
 | `run.cmd` | Main Windows launcher. Activates the environment and runs the GUI module. |
 
 Runtime-generated paths remain at the repository root so restart and operational behavior does not change:
@@ -180,11 +185,11 @@ HG.greeksoft()
 
 ### Quantity Controls
 
-Freeze quantities are configured per symbol:
+Freeze quantities are configured per symbol in `shared_config.py`. The broker modules read these shared settings directly. Restart Copy Trade after changing them:
 
 ```python
 niftyFreeze = 1800
-bnfFreeze = 600
+bnfFreeze = 900
 sensexFreeze = 1000
 bankex = 900
 midcpnifty = 2800
@@ -1334,12 +1339,12 @@ It first checks `otm_description_by_key`, then falls back to dataframe filtering
 
 ### Redis And Circuit Helpers
 
-Redis sources are configured in `credentials.py`:
+Redis sources are configured in `shared_config.py` and read directly by `src/utils/fetch_circuit.py`:
 
 ```python
 redis_sources = [
-    {"name": "primary", "host": "100.103.231.7", "port": 6379, "db": 1},
-    # {"name": "secondary", "host": "SECONDARY_REDIS_IP", "port": 6379, "db": 1},
+    {"name": "DESKTOP-CLI5HO6", "host": "100.103.231.7", "port": 6379, "db": 1},
+    {"name": "Data-KAI", "host": "100.68.131.14", "port": 6379, "db": 1},
 ]
 ```
 

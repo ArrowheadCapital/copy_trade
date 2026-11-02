@@ -5,7 +5,7 @@ from time import perf_counter
 import redis
 import threading
 from dotenv import load_dotenv
-import credentials as cre
+import shared_config
 from src.utils.async_logger import printt
 from redis.backoff import NoBackoff
 from redis.retry import Retry
@@ -22,7 +22,7 @@ TER_LIMITS_CACHE_TTL = 0.2
 
 def get_redis_sources():
     try:
-        return getattr(cre, "redis_sources", [
+        return getattr(shared_config, "redis_sources", [
             {"name": "DESKTOP-CLI5HO6", "host": "100.103.231.7", "port": 6379, "db": 1}
         ])
     except Exception as e:

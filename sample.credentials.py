@@ -7,13 +7,6 @@ load_dotenv()
 pathNSE = "C:/AutoOnlineBackup/NSE/FO/{formatted_date}AUTOTRD.txt"
 pathBSE = "C:/AutoOnlineBackup/BSE/FO/{formatted_date}AUTOTRD.txt"
 
-# Broker freeze quantities.
-niftyFreeze = 1800
-bnfFreeze = 600
-sensexFreeze = 1000
-bankex = 900
-midcpnifty = 2800
-finnifty = 1800
 
 # Copy settings.
 multiplier = 1
@@ -50,10 +43,6 @@ secret_key = "STRATX_SECRET_KEY"
 stratX_url = "STRATX_API_HOST"
 strategy_name = "STRATX_STRATEGY_NAME"
 
-# Redis pricing sources. Add another dictionary for a fallback source if needed.
-redis_sources = [
-    {"name": "primary", "host": "127.0.0.1", "port": 6379, "db": 1},
-]
 
 # Shared GreekSoft/StratX net limits. Zero is the safe sample default.
 NIFTY_CE_POS_NET = 0
