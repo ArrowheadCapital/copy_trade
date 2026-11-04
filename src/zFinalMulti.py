@@ -509,6 +509,24 @@ for _ in range(MAX_WORKERS):
 
 H.printt(f"Started {MAX_WORKERS} NSE workers and {MAX_WORKERS} BSE workers")
 
+def source_has_today_rows(df, source):
+    """Check file dates only at startup or while waiting for CTCL replacement."""
+    if df.empty:
+        return False
+    try:
+        if source == "NSE":
+            dates = df.iloc[:, 25].astype(str).str.strip().str.rsplit(n=1).str[0]
+            date_format = "%d %b %Y"
+        else:
+            dates = df.iloc[:, 14].astype(str).str.strip()
+            date_format = "%d/%m/%Y"
+        today_date = datetime.datetime.now().date()
+        return all(datetime.datetime.strptime(value, date_format).date() == today_date
+                   for value in dates.unique())
+    except (ValueError, TypeError, IndexError):
+        return False
+
+
 # ================= CSV TRACKERS =================
 last_nse = pd.DataFrame()
 last_bse = pd.DataFrame()
@@ -516,6 +534,8 @@ nse_last_mtime = 0
 bse_last_mtime = 0
 nse_header_valid = None
 bse_header_valid = None
+nse_waiting_for_today = False
+bse_waiting_for_today = False
 csv_state_lock = threading.Lock()
 
 # NSE
@@ -524,9 +544,13 @@ if os.path.exists(csvPathNSE):
         nse_header_valid = validate_source_header(csvPathNSE, ",", NSE_EXPECTED_HEADER, "NSE")
         if nse_header_valid:
             df_init = pd.read_csv(csvPathNSE, header=None, engine="python", skiprows=1)
-            nse_seen = len(df_init)
+            nse_waiting_for_today = not source_has_today_rows(df_init, "NSE")
+            nse_seen = 0 if nse_waiting_for_today else len(df_init)
             last_nse = df_init
-            H.printt(f"NSE copy starts from data row {nse_seen}")
+            if nse_waiting_for_today:
+                H.printt("NSE source dates are not today or invalid; waiting for today's data")
+            else:
+                H.printt(f"NSE copy starts from data row {nse_seen}")
         else:
             nse_seen = 0
         if nse_header_valid is not None:
@@ -545,9 +569,13 @@ if os.path.exists(csvPathBSE):
         bse_header_valid = validate_source_header(csvPathBSE, "|", BSE_EXPECTED_HEADER, "BSE")
         if bse_header_valid:
             df_init = pd.read_csv(csvPathBSE, sep="|", header=None, skiprows=1)
-            bse_seen = len(df_init)
+            bse_waiting_for_today = not source_has_today_rows(df_init, "BSE")
+            bse_seen = 0 if bse_waiting_for_today else len(df_init)
             last_bse = df_init
-            H.printt(f"BSE copy starts from data row {bse_seen}")
+            if bse_waiting_for_today:
+                H.printt("BSE source dates are not today or invalid; waiting for today's data")
+            else:
+                H.printt(f"BSE copy starts from data row {bse_seen}")
         else:
             bse_seen = 0
         if bse_header_valid is not None:
@@ -562,7 +590,7 @@ else:
 
 
 def process_nse_csv():
-    global nse_seen, last_nse, nse_last_mtime, nse_header_valid
+    global nse_seen, last_nse, nse_last_mtime, nse_header_valid, nse_waiting_for_today
     if not os.path.exists(csvPathNSE):
         return
     sync_ingestion_started = False
@@ -602,6 +630,11 @@ def process_nse_csv():
                 return
             nse_last_mtime = current_mtime
             last_nse = df
+            if nse_waiting_for_today:
+                if not source_has_today_rows(df, "NSE"):
+                    return
+                nse_waiting_for_today = False
+                H.printt("NSE today's source data is ready; processing from first data row")
             if len(df) <= nse_seen:
                 return
             new_rows = df.iloc[nse_seen:]
@@ -672,7 +705,7 @@ def process_nse_csv():
 
 
 def process_bse_csv():
-    global bse_seen, last_bse, bse_last_mtime, bse_header_valid
+    global bse_seen, last_bse, bse_last_mtime, bse_header_valid, bse_waiting_for_today
     if not os.path.exists(csvPathBSE):
         return
     sync_ingestion_started = False
@@ -710,6 +743,11 @@ def process_bse_csv():
                 return
             bse_last_mtime = current_mtime
             last_bse = df
+            if bse_waiting_for_today:
+                if not source_has_today_rows(df, "BSE"):
+                    return
+                bse_waiting_for_today = False
+                H.printt("BSE today's source data is ready; processing from first data row")
             if len(df) <= bse_seen:
                 return
             new_rows = df.iloc[bse_seen:]

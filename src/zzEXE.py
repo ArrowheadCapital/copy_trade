@@ -14,6 +14,35 @@ repository_root = str(Path(__file__).resolve().parent.parent)
 if repository_root not in sys.path:
     sys.path.insert(0, repository_root)
 
+def acquire_instance_mutex(folder):
+    """Keep one GUI process per installation folder in this Windows session."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    import hashlib
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    folder_key = hashlib.sha256(os.path.normcase(os.path.realpath(folder)).encode("utf-8")).hexdigest()
+    ctypes.set_last_error(0)
+    handle = kernel32.CreateMutexW(None, False, "Local\\CopyTrade_" + folder_key)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        messagebox.showinfo("Copy Trade", "Copy Trade is already running from this folder.")
+        raise SystemExit(0)
+    return handle  # Keep open until process exit; Windows also closes it after a crash.
+
+
+# Acquire before loading account configuration or constructing the GUI.
+_instance_mutex = acquire_instance_mutex(repository_root)
+
 import credentials as cre
 importlib.reload(cre)
 

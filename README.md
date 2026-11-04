@@ -34,7 +34,7 @@ For installation on a new PC, follow the [step-by-step setup guide](docs/SETUP.m
 | `docs/` | Supporting documentation, including the simulator guide and historical resolved issues. |
 | `credentials.py` | User-specific broker, path, multiplier, net limits, and strategy configuration. |
 | `shared_config.py` | Git-tracked freeze quantities and Redis sources, read directly by broker and pricing modules. |
-| `run.cmd` | Main Windows launcher. Activates the environment and runs the GUI module. |
+| `run.cmd` | Main Windows launcher. Runs the GUI using `.venv` or `venv` Python without a console window. |
 
 Runtime-generated paths remain at the repository root so restart and operational behavior does not change:
 
@@ -59,11 +59,9 @@ The normal live entry point is:
 run.cmd
 ```
 
-`run.cmd` activates `.venv` or `venv`, then runs from the repository root:
+`run.cmd` changes to the repository root and starts `.venv\Scripts\pythonw.exe -m src.zzEXE`. If that interpreter is absent, it uses `venv\Scripts\pythonw.exe`. It launches the GUI without a console window; activating the environment separately is not required.
 
-```text
-python -m src.zzEXE
-```
+On Windows, a named mutex prevents a second GUI instance from the same installation folder in the same Windows session. Launching `run.cmd` again shows "Copy Trade is already running from this folder." and exits the second process. Separate installation folders can run independently. The mutex is released automatically when the owning process exits, including after a crash.
 
 The GUI opens and the Start Algo button runs:
 
@@ -82,12 +80,12 @@ NSE/BSE trade CSV changes
   -> selected broker places order
   -> orderbook thread polls broker orderbook
   -> selected broker retry processor handles retryable failed rows
-  -> trades.csv is refreshed
+  -> trades.csv (StratX) or Trades/trades_YYYYMMDD.csv (GreekSoft) is refreshed
 ```
 
 ## Configuration
 
-Broker and account configuration lives in `credentials.py`. Reconciliation timing and rollout controls are kept beside the runtime settings in `src/zFinalMulti.py`.
+Broker and account configuration lives in `credentials.py`. Shared freeze quantities and Redis sources live in the Git-tracked `shared_config.py`, which the broker and Redis modules read directly; do not import these settings into `credentials.py`. Source-row delay and the StratX instrument path are configured in `.env`. Reconciliation timing and rollout controls are kept beside the runtime settings in `src/zFinalMulti.py`.
 
 The most important settings are:
 
@@ -98,7 +96,7 @@ The most important settings are:
 | `multiplier`                                                                                                                                                              | Multiplies copied order quantity. Default is`1`.                                                                                                                                                                                                                                                                       |
 | `copy_source_id`                                                                                                                                                          | Source id allowed for copied rows. NSE and BSE rows with a different source id are skipped before combining.                                                                                                                                                                                                            |
 | `source_strategy_names`                                                                                                                                                   | List of source strategy names allowed for copied NSE and BSE rows.                                                                                                                                                                                                                                                       |
-| `niftyFreeze`,`bnfFreeze`,`sensexFreeze`,`bankex`,`midcpnifty`,`finnifty`                                                                                       | Freeze quantity limits used while placing/splitting orders.                                                                                                                                                                                                                                                              |
+| `niftyFreeze`,`bnfFreeze`,`sensexFreeze`,`bankex`,`midcpnifty`,`finnifty`                                                                                       | Freeze quantity limits from `shared_config.py`, used while placing/splitting orders.                                                                                                                                                                                                                                                              |
 | `optionInstrumentPath`                                                                                                                                                    | StratX instrument CSV path, loaded from`OPTION_INSTRUMENT_CSV`in`.env`.                                                                                                                                                                                                                                              |
 | `strategy_name`                                                                                                                                                           | Strategy name sent in StratX payload. Strategy-specific OTM logic also uses this value.                                                                                                                                                                                                                                  |
 | StratX Expiry Mode dropdown                                                                                                                                               | StratX Impulse Core offset mode in the GUI. Default `Non Expiry` uses offset `0`; `Expiry` uses offset `1`.                                                                                                                                                                                                            |
@@ -121,6 +119,33 @@ datetime.datetime.today().strftime("%m%d")
 For example, on June 2 the file name date part is `0602`.
 
 NSE files are comma-separated. BSE files are pipe-separated. Each exchange's first row is validated once against its exact expected header. A mismatch disables copying for that exchange for the current run. After validation, the header is skipped and existing positional trade-row processing continues unchanged.
+
+### Existing AUTOTRD Files At Startup
+
+AUTOTRD filenames contain only `MMDD`, so a file left from a previous year can have the same name as today's file. Copy Trade checks the dates inside an existing, readable source file before setting its startup row pointer. NSE and BSE are handled independently for both brokers:
+
+* If every data-row date is today, existing rows become the starting baseline and are skipped, preserving normal restart behavior.
+* If dates are old, mixed, or invalid, the pointer stays at `0` and that exchange waits for today's data. Old rows do not become the baseline.
+* While waiting, changed files are checked again. Empty/header-only contents or failed reads do not release the waiting state. Once all data-row dates are today, normal processing begins from the first data row.
+* Every released row still passes the existing source-ID, strategy, instrument, underlying, and `COPY_ALLOWED_DELAY_SECONDS` filters before it can be copied.
+
+`source_has_today_rows(df, source)` receives data with the header already skipped. It extracts the date from NSE column index `25` (`03 NOV 2026 09:15:06` → `03 NOV 2026`, parsed with `%d %b %Y`) and reads BSE column index `14` directly (`29/10/2026`, parsed with `%d/%m/%Y`). It checks every unique date against the PC's current local date. The date scan runs at startup and while waiting, not on ordinary updates after the source is accepted.
+
+For example, an old 50-row file leaves the pointer at `0`. After CTCL overwrites it with today's first trade, that row is checked immediately rather than waiting for row 51. Copy Trade does not modify the source file or reset an established current-day pointer just because the file shrinks. A same-day rewrite after normal copying has begun is outside this startup fix.
+
+The startup log reports:
+
+```text
+NSE source dates are not today or invalid; waiting for today's data
+```
+
+When today's data becomes ready:
+
+```text
+NSE today's source data is ready; processing from first data row
+```
+
+BSE uses the corresponding `BSE` prefix. Header validation remains separate: a mismatched header disables copying for that exchange for the run.
 
 ### Copy Source Filter
 
@@ -389,7 +414,7 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[15]` | Source price.                                                          |
 | `t[17]` | Client code. Filtering by this is present in comments, but not active. |
 | `t[23]` | Exchange order id used by combine logic.                               |
-| `t[25]` | Source row timestamp used by copy delay filter, for example`13 APR 2026 09:15:02`. |
+| `t[25]` | Source row timestamp used by startup date validation and the copy delay filter, for example`13 APR 2026 09:15:02`. |
 | `t[26]` | Source strategy name checked against `source_strategy_names`.                    |
 | `t[27]` | Source id used by copy source filter.                                  |
 
@@ -403,7 +428,7 @@ Only specific column indexes are used by the runtime. If the upstream file forma
 | `t[7]`  | Quantity.                                                              |
 | `t[8]`  | Source price.                                                          |
 | `t[9]`  | Client code. Filtering by this is present in comments, but not active. |
-| `t[14]` | Source row date used by copy delay filter, format`DD/MM/YYYY`.         |
+| `t[14]` | Source row date used by startup date validation and the copy delay filter, format`DD/MM/YYYY`.         |
 | `t[15]` | Source row time used by copy delay filter, format`HH:MM:SS`.           |
 | `t[16]` | Exchange order id used by combine logic.                               |
 | `t[17]` | Instrument description/type field; reconciliation and live copying require it to contain `OPT`. |
@@ -427,10 +452,11 @@ At startup it:
 7. Starts the orderbook thread.
 8. Preloads and synchronizes the selected broker's net state; StratX also loads its instrument data and retry state.
 9. Starts NSE/BSE worker pools.
-10. Starts the file watcher and fallback poll loop.
-11. Starts StratX reconciliation in its own daemon thread only when the selected broker is StratX and `STRATX_RECONCILIATION_ENABLED` is `True`.
+10. Validates existing source headers and checks source dates before establishing the NSE/BSE row pointers, as described below.
+11. Starts the file watcher.
+12. Starts StratX reconciliation in its own daemon thread only when the selected broker is StratX and `STRATX_RECONCILIATION_ENABLED` is `True`, then enters the fallback poll loop.
 
-### `read_csv_safely(path, sep=',', max_retries=3)`
+### `read_csv_safely(path, sep=',', max_retries=3, skiprows=0, allow_empty=False)`
 
 Reads a CSV file defensively. It handles:
 
@@ -438,7 +464,7 @@ Reads a CSV file defensively. It handles:
 * partially written files,
 * parse problems while another process is writing the file.
 
-It retries briefly before logging a failure.
+It retries read failures briefly before logging a failure. Source processing uses `skiprows=1`, so headers are excluded from data rows. Empty files return `None` by default. GreekSoft processing opts into `allow_empty=True`, which returns an empty DataFrame on an empty/header-only file; a failed read still returns `None` without consuming the file modification time.
 
 ### `validate_trade(symbol, qty, strike=None, max_qty=50000)`
 
@@ -578,6 +604,8 @@ last_nse
 last_bse
 nse_last_mtime
 bse_last_mtime
+nse_waiting_for_today
+bse_waiting_for_today
 ```
 
 This prevents duplicate processing when a file watcher event and fallback poll happen close together.
@@ -2128,30 +2156,21 @@ On close:
 
 ## Setup
 
-1. Create and activate a virtual environment.
-2. Install requirements:
+For cloning, branch selection, CTCL export settings, Tailscale, and Windows share access, follow the [Windows setup guide](docs/SETUP.md).
 
-```bash
-pip install -r requirements.txt
-```
-
-3. Configure `.env`:
+1. Create and activate `.venv`, then install `requirements.txt`.
+2. On a fresh installation, copy `sample.env` to `.env` and `sample.credentials.py` to `credentials.py`. Preserve existing account files when updating.
+3. Set `COPY_ALLOWED_DELAY_SECONDS` in `.env` for either broker. StratX also requires `OPTION_INSTRUMENT_CSV`:
 
 ```env
+COPY_ALLOWED_DELAY_SECONDS=120
+# StratX only:
 OPTION_INSTRUMENT_CSV=C:/path/to/options_instruments.csv
 ```
 
-4. Edit `credentials.py`:
-
-* choose `broker`,
-* confirm NSE/BSE CSV paths,
-* fill broker credentials,
-* confirm freeze quantities,
-* set `strategy_name` for `STRATX`,
-* set `multiplier`,
-* set StratX positive/negative net limits if using `STRATX`.
-
-5. Start with:
+4. In `credentials.py`, set the broker, source NSE/BSE paths, `copy_source_id`, `source_strategy_names`, multiplier, destination credentials, and all eight positive/negative net limits for either broker. For GreekSoft, configure the account's shared token-file path when using shared authentication. For StratX, also set `strategy_name` and `STRATX_NET_CLIENT_ID`.
+5. Review freeze quantities and Redis sources in `shared_config.py`. These are read directly by the runtime and should not be duplicated in `credentials.py`. Restart Copy Trade after changing shared settings.
+6. Launch the GUI and review the account configuration before clicking **Start Algo**:
 
 ```bat
 run.cmd
@@ -2176,6 +2195,10 @@ Check market time. Workers sleep outside:
 ```text
 09:15 to 15:40
 ```
+
+### Source says it is waiting for today's data
+
+Check the dates inside the configured source file, including the year, and check the PC's local date. CTCL may leave last year's file unchanged until the first source trade. The copier waits independently for each exchange until the changed file contains today's valid dates. Do not remove the header; it is validated separately and skipped when reading data rows. After release, old rows can still be rejected by `COPY_ALLOWED_DELAY_SECONDS`.
 
 ### StratX net limit order skipped
 
@@ -2236,6 +2259,18 @@ Check:
 ### StratX OTM or retry price fails
 
 OTM/retry pricing uses Redis LTP data through the active Redis failover flow. If all configured Redis sources fail or return stale LTP data, the retry/OTM price is sent as `0` instead of using stale source-price fallback.
+
+## Offline Regression Checks
+
+Run from the repository root with the Windows virtual environment:
+
+```bat
+.venv\Scripts\python.exe -B scripts\test_source_startup.py
+.venv\Scripts\python.exe -B scripts\test_greek_position_sync.py
+.venv\Scripts\python.exe -B scripts\test_ter_pricing.py
+```
+
+The source-startup checks cover prior-year 50-row replacement, current-day restart, no replay after a shrink, delay filtering, and waiting through empty, mixed-date, invalid-date, and failed reads for NSE/BSE with both brokers. These checks are offline; they do not certify live CTCL writes or broker behavior.
 
 ## XTS And Greeksoft Data Standardization
 
