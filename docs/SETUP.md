@@ -79,7 +79,7 @@ In the source account's CTCL terminal:
 
 ## 5. Set freeze quantities and copy settings
 
-Freeze quantities are stored in the Git-tracked `shared_config.py` file. Review these fields there:
+Freeze quantities are stored in `shared_config.py`, the shared configuration file committed and pushed with the repository. Redis sources are kept in the same file. Review these freeze fields there:
 
 ```text
 niftyFreeze
@@ -147,20 +147,29 @@ Use the destination's actual StratX credentials, API host, and strategy name. Su
 
 ## 8. Set net quantity limits for either broker
 
-Set all eight fields in `credentials.py` for both GreekSoft and StratX:
+Set all eight fields in `credentials.py` for both GreekSoft and StratX. The setup values for a **1 crore account** are:
 
 ```python
-NIFTY_CE_POS_NET = 0
-NIFTY_CE_NEG_NET = 0
-NIFTY_PE_POS_NET = 0
-NIFTY_PE_NEG_NET = 0
-SENSEX_CE_POS_NET = 0
-SENSEX_CE_NEG_NET = 0
-SENSEX_PE_POS_NET = 0
-SENSEX_PE_NEG_NET = 0
+NIFTY_CE_POS_NET = 1000
+NIFTY_CE_NEG_NET = 3770
+NIFTY_PE_POS_NET = 1000
+NIFTY_PE_NEG_NET = 3770
+SENSEX_CE_POS_NET = 340
+SENSEX_CE_NEG_NET = 1300
+SENSEX_PE_POS_NET = 340
+SENSEX_PE_NEG_NET = 1300
 ```
 
-Replace every zero with the intended account limit before starting. Values are quantities, not lot counts. Both `POS_NET` and `NEG_NET` are non-negative magnitudes: a positive limit of `100` and a negative limit of `200` allow net quantities from `-200` to `+100`. Zero leaves no allowance on that side.
+Multiply every base value by the account size in crores. The same limit applies separately to CE and PE:
+
+| Limit | Calculation | Example: 50 crore account |
+| --- | --- | ---: |
+| NIFTY positive | `1000 × account size in crores` | 50000 |
+| NIFTY negative | `3770 × account size in crores` | 188500 |
+| SENSEX positive | `340 × account size in crores` | 17000 |
+| SENSEX negative | `1300 × account size in crores` | 65000 |
+
+Values are quantities, not lot counts. Enter both `POS_NET` and `NEG_NET` as non-negative magnitudes. For example, the 1 crore NIFTY limits allow net quantities from `-3770` to `+1000` in each CE/PE bucket. Zero leaves no allowance on that side.
 
 ## 9. Review Redis sources for either broker
 
