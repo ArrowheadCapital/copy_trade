@@ -8,6 +8,8 @@ import os
 import importlib
 import queue
 import time
+import datetime
+import math
 from pathlib import Path
 
 repository_root = str(Path(__file__).resolve().parent.parent)
@@ -356,6 +358,14 @@ def on_close():
     root.destroy()
     os._exit(0)
 
+def schedule_daily_close():
+    """Schedule one close at 18:00 local PC time, even before Start Algo."""
+    now = datetime.datetime.now()
+    cutoff = now.replace(hour=18, minute=0, second=0, microsecond=0)
+    delay_ms = max(0, math.ceil((cutoff - now).total_seconds() * 1000))
+    root.after(delay_ms, on_close)
+
+
 # GUI Setup
 root = tk.Tk()
 root.title("Easy Automation")
@@ -560,4 +570,5 @@ sys.stderr = RedirectText("stderr")
 root.after(GUI_LOG_IDLE_POLL_MS, process_gui_log_queue)
 
 root.protocol("WM_DELETE_WINDOW", on_close)
+schedule_daily_close()
 root.mainloop()
