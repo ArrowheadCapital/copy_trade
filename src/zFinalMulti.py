@@ -147,19 +147,23 @@ def read_csv_safely(path, sep=',', max_retries=3, skiprows=0, allow_empty=False)
 
 def validate_source_header(path, sep, expected_header, source):
     try:
-        with open(path, "r", encoding="utf-8-sig", errors="replace") as source_file:
-            first_line = source_file.readline()
+        for attempt in range(3):
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as source_file:
+                first_line = source_file.readline()
 
-        if not first_line.strip():
-            return None
+            if not first_line.strip():
+                return None
 
-        actual_header = tuple(value.strip() for value in first_line.rstrip("\r\n").split(sep))
-        if actual_header != expected_header:
-            H.printt(f"{source} header mismatch - copying disabled for this run")
-            return False
+            actual_header = tuple(value.strip() for value in first_line.rstrip("\r\n").split(sep))
+            if actual_header == expected_header:
+                H.printt(f"{source} header validated")
+                return True
 
-        H.printt(f"{source} header validated")
-        return True
+            if attempt < 2:
+                time.sleep(0.1)
+
+        H.printt(f"{source} header mismatch - copying disabled for this run")
+        return False
 
     except Exception as e:
         H.printt(f"{source} header validation error | error={e}")

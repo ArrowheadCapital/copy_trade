@@ -100,6 +100,7 @@ File watcher started - zero-sleep signal detection active
 ```
 
 - Check the logs for startup errors. Investigate session-token, login, source-header, instrument-file, and Redis errors before treating the setup as ready.
+- If a header mismatch appears, first confirm **With Strategy Column Name** and **With Header** are ticked in the source CTCL, then restart Copy Trade. If the header issue still appears after restarting, it needs further investigation.
 - If an occasional GreekSoft orderbook request times out and later requests resume normally, that alone does not mean the Copy Trade setup is wrong. Repeated timeouts, order-placement timeouts, or a stopped thread need checking.
 
 The file-watcher message confirms that file monitoring started. The trade check below confirms copying works.

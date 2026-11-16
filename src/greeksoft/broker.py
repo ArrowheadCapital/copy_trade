@@ -118,7 +118,7 @@ class greeksoft:
     greek_order_workers = 5
     greek_request_timeout = 15
     greek_http_max_attempts = 4
-    greek_http_retry_sleep = 0.3
+    greek_http_retry_sleep = 0.8
     greek_retry_state_file = "greek_state.json"
     greek_retry_state_save_interval = 1
     max_greek_orderbook_retries = 3
