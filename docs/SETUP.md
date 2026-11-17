@@ -162,12 +162,12 @@ SENSEX_PE_NEG_NET = 1300
 
 Multiply every base value by the account size in crores. The same limit applies separately to CE and PE:
 
-| Limit | Calculation | Example: 50 crore account |
-| --- | --- | ---: |
-| NIFTY positive | `1000 × account size in crores` | 50000 |
-| NIFTY negative | `3770 × account size in crores` | 188500 |
-| SENSEX positive | `340 × account size in crores` | 17000 |
-| SENSEX negative | `1300 × account size in crores` | 65000 |
+| Limit           | Calculation                        | Example: 50 crore account |
+| --------------- | ---------------------------------- | ------------------------: |
+| NIFTY positive  | `1000 × account size in crores` |                     50000 |
+| NIFTY negative  | `3770 × account size in crores` |                    188500 |
+| SENSEX positive | `340 × account size in crores`  |                     17000 |
+| SENSEX negative | `1300 × account size in crores` |                     65000 |
 
 Values are quantities, not lot counts. Enter both `POS_NET` and `NEG_NET` as non-negative magnitudes. For example, the 1 crore NIFTY limits allow net quantities from `-3770` to `+1000` in each CE/PE bucket. Zero leaves no allowance on that side.
 
@@ -205,3 +205,26 @@ run.cmd
 Review the account and limits displayed in the GUI, then click **Start Algo** when ready to copy trades. Check the GUI/logs for source-header, authentication, instrument-file, and Redis errors.
 
 On `sync-greeksoft`, GreekSoft also has **Sync Positions**, which compares source positions with the destination and can submit correction orders. **Sync Net** refreshes net-risk quantities. See the [README&#39;s GreekSoft orderbook, retry, and position-sync documentation](../README.md#greeksoft-orderbook-retry) for the detailed behavior and limitations before using position sync.
+
+## 12. Add the Trade Multiplier profile (GreekSoft only)
+
+After completing the GreekSoft Copy Trade setup, add the new source-to-destination profile to the **Trade Multiplier Streamlit** app. This app is used to see mismatches between the source and destination accounts. This step applies only to GreekSoft.
+
+1. Use the Tailscale IP of **desktop-dft6h9p**: `100.84.50.79`.
+2. Open **File Explorer → Network**, enter `\\100.84.50.79\d\MiniAdmin` in the address bar, and press **Enter**. If prompted, sign in with that PC's Windows username and password and tick **Remember my credentials**.
+3. Open `profiles.yaml` in that folder.
+4. Add a profile for the source and destination just configured, alongside the existing profiles. Match their indentation and keep the existing entries. For example:
+
+```yaml
+  - name: Source Destination
+    source_client: H123
+    multiplier_file: '\\100.69.42.15\copy_trade_TS123\credentials.py'
+    source_nse_directory: '\\100.69.42.15\d\H123\AutoOnlineBackup\NSE\FO'
+    source_bse_directory: '\\100.69.42.15\d\H123\AutoOnlineBackup\BSE\FO'
+    destination_nse_directory: '\\100.69.42.15\d\TS123\AutoOnlineBackup\NSE\FO'
+    destination_bse_directory: '\\100.69.42.15\d\TS123\AutoOnlineBackup\BSE\FO'
+```
+
+Replace `Source Destination` with a descriptive profile name and `H123` with the actual source client ID. Set `multiplier_file` to the new Copy Trade installation's `credentials.py`. Set the four directory paths to the actual source and destination NSE/BSE export folders, using each PC's Tailscale IP and shared folder. The example uses `100.69.42.15` for both accounts and `TS123` as the destination; change these to match the setup. Keep the YAML paths single-quoted so the backslashes are preserved.
+
+Save `profiles.yaml`, then check the new profile in Trade Multiplier Streamlit for source/destination mismatches.
