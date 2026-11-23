@@ -232,7 +232,9 @@ class GreekPositionSync:
             side = self.broker.normalize_order_side(get(row, "side", ""))
             sign = 1 if side == "BUY" else -1
             status = str(get(row, "order_status", "")).strip().upper()
-            terminal = status in ("TRADED", "CANCELLED", "CANCELED", "EXCHANGE REJECTED", "REJECTED")
+            if not status:
+                raise ValueError("Missing active order status")
+            is_active = status in ("PENDING", "PARTIALLY EXECUTED")
             fingerprint = (key, sign, qty, pending, status)
             if order_id in seen:
                 if seen[order_id] != fingerprint:
@@ -240,9 +242,7 @@ class GreekPositionSync:
                 continue
             seen[order_id] = fingerprint
             traded[key] = traded.get(key, 0) + sign * qty
-            if not terminal:
-                if not status:
-                    raise ValueError("Missing active order status")
+            if is_active:
                 active[order_id] = (key, sign * pending)
             indexed[order_id] = (key, qty, pending, status, row)
             instruments[key] = dt
@@ -297,7 +297,7 @@ class GreekPositionSync:
                     raise ValueError("Tracked order contract mismatch")
                 represented.add(order_id)
                 record["remaining"] = data[2]
-                if data[3] == "TRADED" or (data[2] == 0):
+                if order_id not in active or data[2] == 0:
                     self.pending.pop(root)
                     continue
             sign = 1 if self.broker.normalize_order_side(task["side"]) == "BUY" else -1
