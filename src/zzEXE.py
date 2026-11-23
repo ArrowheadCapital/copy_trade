@@ -167,6 +167,9 @@ def get_start_config_errors():
     if not isinstance(source_strategy_names, (list, tuple, set)) or not any(str(name).strip() for name in source_strategy_names):
         errors.append("source_strategy_names must contain at least one strategy")
 
+    if cre.broker.upper() == "GREEK" and not str(getattr(cre, "greek_broker", "") or "").strip():
+        errors.append('Add greek_broker in credentials.py (for example, greek_broker = "SHAREINDIA")')
+
     if cre.broker.upper() == "STRATX" and not str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip():
         errors.append("STRATX_NET_CLIENT_ID is missing or empty")
 

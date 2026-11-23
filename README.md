@@ -354,6 +354,7 @@ For retry orders, it sends only the failed clients found in the StratX orderbook
 Greeksoft needs these values in `credentials.py`:
 
 ```python
+greek_broker = "SHAREINDIA"  # Required when broker = "GREEK"; case-insensitive.
 urll = "11.111.11.114:3333"
 username = "TS111"
 pw = "PASSWORD123"
@@ -878,14 +879,17 @@ These live in `src/utils/broker_helpers.py` and are re-exported by `src/helperGS
 
 This remains in `src/greeksoft/broker.py` because it is GreekSoft-specific. It implements the existing GreekSoft order rate limiter.
 
-Current rate:
+Set `greek_broker` in `credentials.py` when `broker = "GREEK"`. Missing or blank values stop startup with a configuration error. Names are case-insensitive and surrounding whitespace is ignored:
 
-```python
-MAX_GREEK_ORDERS_PER_WINDOW = 9
-GREEK_RATE_WINDOW_SECONDS = 1.2
-```
+| `greek_broker` | Order attempts per rolling 1.2 seconds |
+| --- | --- |
+| `SHAREINDIA` | 30 |
+| `MOTILAL` | 5 |
+| Any other non-empty name | 9 |
 
-The function uses a timestamp deque and sleeps until a new order slot is available.
+`GREEK_RATE_WINDOW_SECONDS` remains `1.2`. Restart Copy Trade after changing `greek_broker`. This setting selects the order limit; `urll` still selects the destination server.
+
+The function uses a timestamp deque and sleeps until a new order slot is available. All GreekSoft workers share this process-local limit, including split orders and retries.
 
 ### `getFreezeQua(freeze_limit, lot_size, total_quantity)`
 

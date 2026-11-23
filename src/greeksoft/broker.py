@@ -129,6 +129,12 @@ class greeksoft:
     def __init__(self):
         global username
         global pw
+        global MAX_GREEK_ORDERS_PER_WINDOW
+        greek_broker = str(getattr(cre, "greek_broker", "") or "").strip().upper()
+        if not greek_broker:
+            raise ValueError('Add greek_broker in credentials.py when broker is GREEK (for example, greek_broker = "SHAREINDIA")')
+        MAX_GREEK_ORDERS_PER_WINDOW = {"SHAREINDIA": 30, "MOTILAL": 5}.get(greek_broker, 9)
+        printt(f"GREEK_RATE_LIMIT | broker={greek_broker} | orders={MAX_GREEK_ORDERS_PER_WINDOW}")
         self.greek_thread_local = threading.local()
         self.greek_order_pool = ThreadPoolExecutor(max_workers=self.greek_order_workers, thread_name_prefix="greek_order")
         self.greek_auth_recovery_lock = threading.Lock()

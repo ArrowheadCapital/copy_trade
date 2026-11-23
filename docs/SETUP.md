@@ -107,7 +107,7 @@ Replace the multiplier and strategy name with the intended values. `copy_source_
 
 ## 6. Configure the GreekSoft destination
 
-For GreekSoft, set `broker = "GREEK"` and choose `urll` according to the destination:
+For GreekSoft, set `broker = "GREEK"`, set the required `greek_broker` in `credentials.py`, and choose `urll` according to the destination. `greek_broker` is case-insensitive: `SHAREINDIA` allows 30 order attempts per rolling 1.2 seconds, `MOTILAL` allows 5, and any other non-empty name allows 9. A missing or blank value stops startup. Restart Copy Trade after changing it; `urll` still selects the destination server:
 
 | Destination | `urll`                |
 | ----------- | ----------------------- |
@@ -117,6 +117,7 @@ For GreekSoft, set `broker = "GREEK"` and choose `urll` according to the destina
 For example, for ShareIndia:
 
 ```python
+greek_broker = "SHAREINDIA"
 urll = "14.143.11.114:3344"
 username = "DESTINATION_GREEK_USERNAME"
 pw = "DESTINATION_GREEK_PASSWORD"

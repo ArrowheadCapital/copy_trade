@@ -15,6 +15,7 @@ source_strategy_names = ["SOURCE_STRATEGY"]
 broker = "GREEK"  # GREEK or STRATX
 
 # GreekSoft settings.
+greek_broker = "SHAREINDIA"  # Required for GREEK; case-insensitive. SHAREINDIA=30, MOTILAL=5, others=9 per 1.2s.
 urll = "GREEK_API_HOST:PORT"
 username = "GREEK_USERNAME"
 pw = "GREEK_PASSWORD"
