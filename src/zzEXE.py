@@ -195,10 +195,10 @@ def run_algo():
 
     algo_button.config(state='disabled')
     if cre.broker.upper() == "STRATX":
-        selected_mode = stratx_expiry_var.get().strip().upper().replace(" ", "_")
+        selected_mode = "EXPIRY" if stratx_expiry_var.get() == "1 Strike Far" else "NON_EXPIRY"
         stratx_started_mode = selected_mode
         os.environ["STRATX_EXPIRY_MODE"] = selected_mode
-        print(f"[INFO] StratX expiry mode: {stratx_expiry_var.get()}")
+        print(f"[INFO] StratX strike mode: {stratx_expiry_var.get()}")
     thread = threading.Thread(target=exec_script, args=('src/zFinalMulti.py', on_algo_complete))
     thread.start()
 
@@ -219,10 +219,10 @@ def get_config_info():
         net_client_id = str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip() or "Missing"
         lines.append(f"Net Client ID: {net_client_id}")
 
-        if str(cre.strategy_name).strip().upper() == "IMPULSE CORE":
-            mode = stratx_started_mode or stratx_expiry_var.get().strip().upper().replace(" ", "_")
+        if str(cre.strategy_name).strip().upper() in ("IMPULSE CORE", "VOLATILITY CORE"):
+            mode = stratx_started_mode or ("EXPIRY" if stratx_expiry_var.get() == "1 Strike Far" else "NON_EXPIRY")
             offset = 1 if mode == "EXPIRY" else 0
-            lines.append(f"OTM Offset: {offset} ({mode.replace('_', ' ').title()})")
+            lines.append(f"OTM Offset: {offset} ({'1 Strike Far' if offset else 'Same Strike'})")
 
     def net_range(bucket):
         try:
@@ -537,16 +537,16 @@ def process_gui_log_queue():
 button_frame = ttk.Frame(logs_card)
 button_frame.grid(row=1, column=0, pady=10)
 
-stratx_expiry_var = tk.StringVar(value="Non Expiry")
+stratx_expiry_var = tk.StringVar(value="Same Strike")
 action_column = 0
 if cre.broker.upper() == "STRATX":
-    expiry_label = ttk.Label(button_frame, text="Expiry Mode")
+    expiry_label = ttk.Label(button_frame, text="Strike Mode")
     expiry_label.grid(row=0, column=0, padx=(4, 2), pady=4)
 
     expiry_dropdown = ttk.Combobox(
         button_frame,
         textvariable=stratx_expiry_var,
-        values=("Non Expiry", "Expiry"),
+        values=("Same Strike", "1 Strike Far"),
         state="readonly",
         width=12
     )
