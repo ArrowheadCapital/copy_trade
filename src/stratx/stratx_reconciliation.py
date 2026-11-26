@@ -191,7 +191,7 @@ class StratXReconciliation:
 
         if strategy_key == "VOLATILITY CORE":
             final_quantity *= 2
-        elif strategy_key == "IMPULSE CORE":
+        elif strategy_key in ("IMPULSE CORE", "PRIME CORE"):
             final_strike = self.broker.get_otm_strike(symbol, right, final_strike, offset=self.broker.impulse_offset)
 
         if final_strike is None or final_quantity <= 0:

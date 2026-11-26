@@ -89,7 +89,7 @@ class StratX:
         mode = str(os.getenv("STRATX_EXPIRY_MODE", "NON_EXPIRY")).strip().upper()
         self.stratx_expiry_mode = mode.replace("-", "_").replace(" ", "_")
         self.impulse_offset = 1 if self.stratx_expiry_mode == "EXPIRY" else 0
-        printt(f"STRATX_EXPIRY_MODE | mode={self.stratx_expiry_mode} | impulse_offset={self.impulse_offset}")
+        printt(f"STRATX_EXPIRY_MODE | strategy={str(cre.strategy_name).strip().upper()} | mode={self.stratx_expiry_mode} | otm_offset={self.impulse_offset}")
 
     def get_stratx_session(self):
         try:
@@ -2170,7 +2170,7 @@ class StratX:
                     "NSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description, source_order_id=source_order_id
                 ))
 
-            elif strategy_key in ("IMPULSE CORE", "VOLATILITY CORE") and right in ("CE", "PE") and strike is not None:
+            elif strategy_key in ("IMPULSE CORE", "VOLATILITY CORE", "PRIME CORE") and right in ("CE", "PE") and strike is not None:
                 if strategy_key == "VOLATILITY CORE":
                     qty *= 2
                 otm_strike = self.get_otm_strike(name, right, strike, offset=self.impulse_offset)
@@ -2278,7 +2278,7 @@ class StratX:
                     "BSEFO", segment, right, freez, lot_size, csv_read_ts, timing_ctx, description=description, source_order_id=source_order_id
                 ))
 
-            elif strategy_key in ("IMPULSE CORE", "VOLATILITY CORE") and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
+            elif strategy_key in ("IMPULSE CORE", "VOLATILITY CORE", "PRIME CORE") and symbol == "SENSEX" and right in ("CE", "PE") and strike is not None:
                 if strategy_key == "VOLATILITY CORE":
                     qty *= 2
                 otm_strike = self.get_otm_strike(symbol, right, strike, offset=self.impulse_offset)

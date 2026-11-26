@@ -219,7 +219,7 @@ def get_config_info():
         net_client_id = str(getattr(cre, "STRATX_NET_CLIENT_ID", "") or "").strip() or "Missing"
         lines.append(f"Net Client ID: {net_client_id}")
 
-        if str(cre.strategy_name).strip().upper() in ("IMPULSE CORE", "VOLATILITY CORE"):
+        if str(cre.strategy_name).strip().upper() in ("IMPULSE CORE", "VOLATILITY CORE", "PRIME CORE"):
             mode = stratx_started_mode or ("EXPIRY" if stratx_expiry_var.get() == "1 Strike Far" else "NON_EXPIRY")
             offset = 1 if mode == "EXPIRY" else 0
             lines.append(f"OTM Offset: {offset} ({'1 Strike Far' if offset else 'Same Strike'})")
