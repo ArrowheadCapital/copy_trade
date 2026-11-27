@@ -155,8 +155,7 @@ class GreekPositionSync:
                     else:
                         # The compact BSE export combines book/instrument at 17
                         # and shifts the tail left once. Reject other short layouts.
-                        compact = (len(row) == 23 and row[17].strip().upper() == "L,BSE OPT"
-                                   and row[20].strip().upper() == "CARRYFORWARD")
+                        compact = len(row) == 23
                         if len(row) != len(header) and not compact:
                             raise ValueError(f"{exchange} incomplete source row")
                         id_index, strategy_index = -1, -2
